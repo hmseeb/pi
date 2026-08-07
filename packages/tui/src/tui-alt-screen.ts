@@ -158,6 +158,8 @@ export interface TuiAltScreenOptions {
 	 * an error otherwise. When omitted, the selection is copied via an OSC 52 write.
 	 */
 	copySelection?: (text: string) => Promise<boolean>;
+	/** Handle a successful text-selection copy. Return true to suppress the default flash. */
+	onSelectionCopied?: (text: string) => boolean;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
@@ -198,6 +200,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly onSelectionCopied?: (text: string) => boolean;
 
 	constructor(
 		terminal: Terminal,
@@ -221,6 +224,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copySelection = options.copySelection;
+		this.onSelectionCopied = options.onSelectionCopied;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -1082,10 +1086,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// without OSC 52 clipboard passthrough), so only report success when it actually copies.
 		if (this.copySelection) {
 			const ok = await this.copySelection(text);
+			if (ok) {
+				try {
+					if (this.onSelectionCopied?.(text)) return;
+				} catch {
+					// Selection-copy feedback is best-effort.
+				}
+			}
 			this.flash(ok ? "Copied!" : "Copy failed");
 			return;
 		}
 		this.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+		try {
+			if (this.onSelectionCopied?.(text)) return;
+		} catch {
+			// Selection-copy feedback is best-effort.
+		}
 		this.flash("Copied!");
 	}
 

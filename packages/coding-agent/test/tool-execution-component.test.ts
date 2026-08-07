@@ -30,6 +30,13 @@ function createFakeTui(): TUI {
 	} as unknown as TUI;
 }
 
+function createFakeViewportTui(): TUI {
+	return {
+		[Symbol.for("@earendil-works/pi-tui/viewport")]: true,
+		requestRender: () => {},
+	} as unknown as TUI;
+}
+
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
 		initTheme("dark");
@@ -65,6 +72,63 @@ describe("ToolExecutionComponent parity", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("custom call");
 		expect(rendered).toContain("custom result");
+	});
+
+	test("does not include padded spaces in fullscreen tool hyperlinks", () => {
+		const previousTermProgram = process.env.TERM_PROGRAM;
+		process.env.TERM_PROGRAM = "TestTerminal";
+		try {
+			const component = new ToolExecutionComponent(
+				"custom_tool",
+				"tool-link-padding",
+				{},
+				{},
+				{
+					...createBaseToolDefinition(),
+					renderCall: () => new Text("clickable", 0, 0),
+				},
+				createFakeViewportTui(),
+				process.cwd(),
+			);
+
+			const open = "\x1b]8;;pi-tool:tool-link-padding\x1b\\";
+			const close = "\x1b]8;;\x1b\\";
+			const linkedLabels = component
+				.render(40)
+				.filter((line) => line.includes(open))
+				.map((line) => line.slice(line.indexOf(open) + open.length, line.lastIndexOf(close)))
+				.map(stripAnsi);
+
+			expect(linkedLabels.length).toBeGreaterThan(0);
+			expect(linkedLabels.every((label) => label.length > 0 && !label.endsWith(" "))).toBe(true);
+		} finally {
+			if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = previousTermProgram;
+		}
+	});
+
+	test("omits fullscreen tool hyperlinks in Orca", () => {
+		const previousTermProgram = process.env.TERM_PROGRAM;
+		process.env.TERM_PROGRAM = "Orca";
+		try {
+			const component = new ToolExecutionComponent(
+				"custom_tool",
+				"tool-orca-link",
+				{},
+				{},
+				{
+					...createBaseToolDefinition(),
+					renderCall: () => new Text("not underlined", 0, 0),
+				},
+				createFakeViewportTui(),
+				process.cwd(),
+			);
+
+			expect(component.render(40).join("\n")).not.toContain("\x1b]8;;pi-tool:");
+		} finally {
+			if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = previousTermProgram;
+		}
 	});
 
 	test("self-rendered empty tool rows take no layout space", () => {

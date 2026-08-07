@@ -146,7 +146,7 @@ import {
 	type StatusIndicator,
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
-import { ToolExecutionComponent } from "./components/tool-execution.ts";
+import { TOOL_LINK_PREFIX, ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -340,6 +340,8 @@ interface InteractiveTuiOptions {
 	logDirectory: string;
 	terminal?: Terminal;
 	onRightClickPaste?: () => void;
+	openUrl?: (url: string) => void;
+	onSelectionCopied?: (text: string) => boolean;
 }
 
 /** Composition root for selecting the interactive terminal renderer. */
@@ -347,12 +349,12 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 	const terminal = options.terminal ?? new ProcessTerminal();
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
-		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
-			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),
-			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
-			openUrl: openBrowser,
+		const altScreenOptions = {
+			searchMatchStyle: (text: string) => theme.underline(styleSearchMatch(text)),
+			searchCurrentMatchStyle: (text: string) => theme.bold(theme.inverse(styleSearchMatch(text))),
+			openUrl: options.openUrl ?? openBrowser,
 			onRightClickPaste: options.onRightClickPaste,
-			copySelection: async (text) => {
+			copySelection: async (text: string) => {
 				try {
 					await copyToClipboard(text);
 					return true;
@@ -360,7 +362,9 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 					return false;
 				}
 			},
-		});
+			onSelectionCopied: options.onSelectionCopied,
+		};
+		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, altScreenOptions);
 	}
 	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
 }
@@ -431,6 +435,7 @@ export class InteractiveMode {
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: WorkingIndicatorOptions | undefined = undefined;
+	private selectionCopyStatusTimer: NodeJS.Timeout | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
@@ -558,6 +563,8 @@ export class InteractiveMode {
 			showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 			logDirectory: getAgentDir(),
 			onRightClickPaste: this.onRightClickPaste,
+			openUrl: (url) => this.openTranscriptLink(url),
+			onSelectionCopied: () => this.showSelectionCopiedStatus(),
 		});
 		this.ui = createInteractiveTuiReference(() => this.renderer);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
@@ -2113,6 +2120,31 @@ export class InteractiveMode {
 			this.activeStatusIndicator.setIndicator(options);
 		}
 		this.ui.requestRender();
+	}
+
+	private showSelectionCopiedStatus(): boolean {
+		let indicator = this.activeStatusIndicator;
+		if (indicator && indicator.kind !== "working") return false;
+		const restoreWorkingMessage = this.session.isStreaming;
+		if (!indicator) {
+			indicator = new WorkingStatusIndicator(this.ui, "Copied!", { frames: [] });
+			this.showStatusIndicator(indicator);
+		}
+
+		if (this.selectionCopyStatusTimer) clearTimeout(this.selectionCopyStatusTimer);
+		indicator.setMessage("Copied!");
+		const timer = setTimeout(() => {
+			if (this.selectionCopyStatusTimer === timer) this.selectionCopyStatusTimer = undefined;
+			if (this.activeStatusIndicator !== indicator) return;
+			if (restoreWorkingMessage) {
+				indicator.setMessage(this.workingMessage ?? this.defaultWorkingMessage);
+			} else {
+				this.clearStatusIndicator("working");
+			}
+		}, 1000);
+		timer.unref();
+		this.selectionCopyStatusTimer = timer;
+		return true;
 	}
 
 	private setHiddenThinkingLabel(label?: string): void {
@@ -3884,13 +3916,19 @@ export class InteractiveMode {
 		this.isShuttingDown = true;
 		try {
 			this.unregisterSignalHandlers();
-		} catch {}
+		} catch (cleanupError) {
+			console.error("Failed to unregister signal handlers during crash cleanup:", cleanupError);
+		}
 		try {
 			killTrackedDetachedChildren();
-		} catch {}
+		} catch (cleanupError) {
+			console.error("Failed to stop detached children during crash cleanup:", cleanupError);
+		}
 		try {
 			this.ui.stop();
-		} catch {}
+		} catch (cleanupError) {
+			console.error("Failed to restore terminal state during crash cleanup:", cleanupError);
+		}
 		console.error(`${APP_NAME} exiting due to uncaughtException:`);
 		console.error(error);
 		process.exit(1);
@@ -4071,6 +4109,13 @@ export class InteractiveMode {
 
 	private toggleToolOutputExpansion(): void {
 		this.setToolsExpanded(!this.toolOutputExpanded);
+	}
+
+	private openTranscriptLink(url: string): void {
+		for (const child of this.chatContainer.children) {
+			if (child instanceof ToolExecutionComponent && child.activateLink(url)) return;
+		}
+		if (!url.startsWith(TOOL_LINK_PREFIX)) openBrowser(url);
 	}
 
 	private setToolsExpanded(expanded: boolean): void {

@@ -1,7 +1,22 @@
-import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	getCapabilities,
+	hyperlink,
+	Image,
+	isImageLine,
+	isViewportTUI,
+	Spacer,
+	sliceByColumn,
+	Text,
+	type TUI,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -11,6 +26,18 @@ const FALLBACK_PREVIEW_LINES = 10;
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
+}
+
+export const TOOL_LINK_PREFIX = "pi-tool:";
+
+function hyperlinkContent(line: string, url: string): string {
+	if (isImageLine(line)) return line;
+	const trailingSpaces = stripAnsi(line).match(/ +$/)?.[0].length ?? 0;
+	const linkedWidth = visibleWidth(line) - trailingSpaces;
+	if (linkedWidth <= 0) return line;
+	return (
+		hyperlink(sliceByColumn(line, 0, linkedWidth, true), url) + sliceByColumn(line, linkedWidth, trailingSpaces, true)
+	);
 }
 
 export class ToolExecutionComponent extends Container {
@@ -214,6 +241,12 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	activateLink(url: string): boolean {
+		if (url !== `${TOOL_LINK_PREFIX}${encodeURIComponent(this.toolCallId)}`) return false;
+		this.setExpanded(!this.expanded);
+		return true;
+	}
+
 	setShowImages(show: boolean): void {
 		this.showImages = show;
 		this.updateDisplay();
@@ -234,13 +267,14 @@ export class ToolExecutionComponent extends Container {
 			return [];
 		}
 
+		let lines: string[];
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
 			const contentLines = this.selfRenderContainer.render(width);
 			if (contentLines.length === 0 && this.imageComponents.length === 0) {
 				return [];
 			}
 
-			const lines: string[] = [];
+			lines = [];
 			if (contentLines.length > 0) {
 				lines.push("");
 				lines.push(...contentLines);
@@ -255,10 +289,13 @@ export class ToolExecutionComponent extends Container {
 					lines.push(...imageComponent.render(width));
 				}
 			}
-			return lines;
+		} else {
+			lines = super.render(width);
 		}
 
-		return super.render(width);
+		if (!isViewportTUI(this.ui) || process.env.TERM_PROGRAM === "Orca") return lines;
+		const url = `${TOOL_LINK_PREFIX}${encodeURIComponent(this.toolCallId)}`;
+		return lines.map((line) => hyperlinkContent(line, url));
 	}
 
 	private updateDisplay(): void {
