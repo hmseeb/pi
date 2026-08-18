@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The focused Editor/Input cursor now blinks, using the SGR 5 blink attribute so the terminal drives the timing and no extra repaints are needed. Terminals without blink support show a steady block as before. New exports: `CURSOR_BLINK_ON` / `CURSOR_BLINK_OFF`.
+
 ## [0.84.2] - 2026-08-14
 
 ### Added

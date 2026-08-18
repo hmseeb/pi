@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
@@ -59,6 +60,66 @@ function intersect(a: LayoutRect, b: LayoutRect): LayoutRect {
 	return { x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y) };
 }
 
+// TEMPORARY DIAGNOSTIC (local, uncommitted): attribute per-frame component
+// render cost. TuiBase.render's "tree" timer does not cover this path, so this
+// work was previously invisible and showed up as opaque layout time.
+const LAYOUT_STATS_ENABLED = process.env.PI_LAYOUT_STATS !== "0";
+const layoutStats = {
+	calls: 0,
+	renders: 0,
+	ms: 0,
+	frames: 0,
+	byComponent: new Map<string, { n: number; ms: number; lines: number }>(),
+	// Per frame: for each component instance, which widths did we render it at?
+	frameWidths: new Map<Component, Set<number>>(),
+	repeatRenders: 0,
+	widthPairs: new Map<string, number>(),
+	lastFlush: Date.now(),
+};
+export function flushLayoutStats(): void {
+	if (!LAYOUT_STATS_ENABLED) return;
+	const now = Date.now();
+	if (now - layoutStats.lastFlush < 1000) return;
+	layoutStats.lastFlush = now;
+	if (layoutStats.frames === 0) return;
+	const top = [...layoutStats.byComponent.entries()]
+		.sort((a, b) => b[1].ms - a[1].ms)
+		.slice(0, 5)
+		.map(([name, s]) => `${name}:${s.ms.toFixed(0)}ms/${s.n}calls/${s.lines}lines`)
+		.join(" ");
+	const pairs = [...layoutStats.widthPairs.entries()]
+		.sort((a, b) => b[1] - a[1])
+		.slice(0, 4)
+		.map(([w, n]) => `${w}x${n}`)
+		.join(" ");
+	try {
+		appendFileSync(
+			"/tmp/pi-alt-stats.log",
+			`  LAYOUT frames=${layoutStats.frames} cachedCalls=${layoutStats.calls} realRenders=${layoutStats.renders} ` +
+				`renderMs=${layoutStats.ms.toFixed(1)} (${(layoutStats.ms / Math.max(1, layoutStats.frames)).toFixed(1)}ms/frame)\n` +
+				`  TOP ${top}\n` +
+				`  WIDTHTHRASH repeatRenders=${layoutStats.repeatRenders} widthsPerComponent=[${pairs}]\n`,
+		);
+	} catch {}
+	layoutStats.calls = 0;
+	layoutStats.renders = 0;
+	layoutStats.ms = 0;
+	layoutStats.frames = 0;
+	layoutStats.byComponent.clear();
+	layoutStats.repeatRenders = 0;
+	layoutStats.widthPairs.clear();
+}
+export function markLayoutFrame(): void {
+	if (!LAYOUT_STATS_ENABLED) return;
+	layoutStats.frames++;
+	for (const widths of layoutStats.frameWidths.values()) {
+		const key = String(widths.size);
+		layoutStats.widthPairs.set(key, (layoutStats.widthPairs.get(key) ?? 0) + 1);
+		if (widths.size > 1) layoutStats.repeatRenders += widths.size - 1;
+	}
+	layoutStats.frameWidths.clear();
+}
+
 function renderCached(context: LayoutContext, component: Component, width: number): string[] {
 	const safeWidth = Math.max(1, Math.floor(width));
 	let widths = context.renderCache.get(component);
@@ -66,9 +127,30 @@ function renderCached(context: LayoutContext, component: Component, width: numbe
 		widths = new Map<number, string[]>();
 		context.renderCache.set(component, widths);
 	}
+	if (LAYOUT_STATS_ENABLED) layoutStats.calls++;
 	let lines = widths.get(safeWidth);
 	if (!lines) {
-		lines = component.render(safeWidth);
+		if (LAYOUT_STATS_ENABLED) {
+			let seen = layoutStats.frameWidths.get(component);
+			if (!seen) {
+				seen = new Set<number>();
+				layoutStats.frameWidths.set(component, seen);
+			}
+			seen.add(safeWidth);
+			const t0 = performance.now();
+			lines = component.render(safeWidth);
+			const dt = performance.now() - t0;
+			layoutStats.renders++;
+			layoutStats.ms += dt;
+			const name = component.constructor?.name ?? "anon";
+			const slot = layoutStats.byComponent.get(name) ?? { n: 0, ms: 0, lines: 0 };
+			slot.n++;
+			slot.ms += dt;
+			slot.lines += lines.length;
+			layoutStats.byComponent.set(name, slot);
+		} else {
+			lines = component.render(safeWidth);
+		}
 		widths.set(safeWidth, lines);
 	}
 	return lines;

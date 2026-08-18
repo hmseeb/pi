@@ -44,6 +44,8 @@ export {
 } from "./components/v-stack.ts";
 // Cursor styling (shared by Editor/Input fake cursors)
 export {
+	CURSOR_BLINK_OFF,
+	CURSOR_BLINK_ON,
 	CURSOR_OUTLINE_OFF,
 	CURSOR_OUTLINE_ON,
 	type CursorRenderer,

@@ -58,6 +58,17 @@ export class ToolExecutionComponent extends Container {
 	 * only redo the pass when the underlying lines or width actually change.
 	 */
 	private readonly linkCache = new CachedLineMap();
+	/**
+	 * Per-line memo for the hyperlink pass.
+	 *
+	 * linkCache only hits on array *reference* equality, and Container.render
+	 * returns a fresh array whenever any single child re-rendered. One animating
+	 * child therefore forced every line in the block back through grapheme-level
+	 * slicing, which profiling showed to be ~43% of all CPU while scrolling.
+	 * Individual line strings stay reference-stable across those rebuilds, so
+	 * memoising per line survives the array churn.
+	 */
+	private lineLinkCache = new Map<string, string>();
 	private selfRenderCacheParts: string[][] | undefined;
 	private selfRenderCacheWidth: number | undefined;
 	private selfRenderCacheLines: string[] | undefined;
@@ -285,6 +296,7 @@ export class ToolExecutionComponent extends Container {
 
 	private clearRenderCaches(): void {
 		this.linkCache.clear();
+		this.lineLinkCache.clear();
 		this.selfRenderCacheWidth = undefined;
 		this.selfRenderCacheParts = undefined;
 		this.selfRenderCacheLines = undefined;
@@ -340,7 +352,22 @@ export class ToolExecutionComponent extends Container {
 
 		if (!isViewportTUI(this.ui) || process.env.TERM_PROGRAM === "Orca") return lines;
 		const url = `${TOOL_LINK_PREFIX}${encodeURIComponent(this.toolCallId)}`;
-		return this.linkCache.map(width, lines, (source) => source.map((line) => hyperlinkContent(line, url)));
+		return this.linkCache.map(width, lines, (source) => {
+			// Generational swap rather than a fixed cap: the previous pass is the
+			// lookup table, this pass builds the next one. Memory stays bounded by
+			// the block's own line count and a large block can never evict the very
+			// entries it is about to reuse, which a size cap does.
+			const prev = this.lineLinkCache;
+			const next = new Map<string, string>();
+			const out = source.map((line) => {
+				let linked = next.get(line) ?? prev.get(line);
+				if (linked === undefined) linked = hyperlinkContent(line, url);
+				next.set(line, linked);
+				return linked;
+			});
+			this.lineLinkCache = next;
+			return out;
+		});
 	}
 
 	private updateDisplay(): void {

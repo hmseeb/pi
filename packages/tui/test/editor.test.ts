@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
 import { Editor, wordWrapLine } from "../src/components/editor.ts";
+import { CURSOR_BLINK_OFF, CURSOR_BLINK_ON } from "../src/cursor.ts";
 import type { TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { visibleWidth } from "../src/utils.ts";
@@ -849,7 +850,10 @@ describe("Editor component", () => {
 				let lines = editor.render(width + paddingX);
 				let contentLines = lines.slice(1, -1);
 				assert.strictEqual(contentLines.length, 1, "Should be 1 content line before wrap");
-				assert.ok(contentLines[0]!.endsWith("\x1b[7m \x1b[27m"), "Cursor should be at end of line");
+				assert.ok(
+					contentLines[0]!.endsWith(`${CURSOR_BLINK_ON}\x1b[7m \x1b[27m${CURSOR_BLINK_OFF}`),
+					"Cursor should be at end of line",
+				);
 
 				// Type 1 more → text wraps to second line
 				editor.handleInput("a");

@@ -8,7 +8,10 @@
  * being a plain reverse-video white block.
  *
  * Focus semantics:
- * - focused   -> filled block (theme colored)
+ * - focused   -> filled block (theme colored), blinking like a native terminal
+ *               cursor. Blink is the SGR 5 attribute, so the terminal owns the
+ *               timing and no repaint timer is needed. Terminals that ignore
+ *               SGR 5 simply show a steady block.
  * - unfocused -> hollow block. A text cell cannot draw left/right borders, so
  *                when the host TUI can park the real terminal cursor on the
  *                caret (main screen, via CURSOR_MARKER) the fake cursor is
@@ -23,9 +26,15 @@ export type CursorRenderer = (grapheme: string, focused: boolean) => string;
 export const CURSOR_OUTLINE_ON = "\x1b[53m\x1b[4m";
 export const CURSOR_OUTLINE_OFF = "\x1b[24m\x1b[55m";
 
-/** Reverse video (filled) when focused, outlined (unfilled) when not. */
+/** SGR 5/25 = blink on/off. Only the focused (filled) cursor blinks. */
+export const CURSOR_BLINK_ON = "\x1b[5m";
+export const CURSOR_BLINK_OFF = "\x1b[25m";
+
+/** Blinking reverse video (filled) when focused, static outline when not. */
 const defaultCursorRenderer: CursorRenderer = (grapheme, focused) =>
-	focused ? `\x1b[7m${grapheme}\x1b[27m` : `${CURSOR_OUTLINE_ON}${grapheme}${CURSOR_OUTLINE_OFF}`;
+	focused
+		? `${CURSOR_BLINK_ON}\x1b[7m${grapheme}\x1b[27m${CURSOR_BLINK_OFF}`
+		: `${CURSOR_OUTLINE_ON}${grapheme}${CURSOR_OUTLINE_OFF}`;
 
 // Shared across module loaders (tsx + jiti in dev mode), same trick as the theme.
 const CURSOR_RENDERER_KEY = Symbol.for("@earendil-works/pi-tui:cursor-renderer");

@@ -1,3 +1,4 @@
+import { appendFileSync as __appendWidthStats } from "node:fs";
 import { eastAsianWidth } from "get-east-asian-width";
 
 // segmenters (shared instance)
@@ -50,7 +51,33 @@ const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 // Cache for non-ASCII strings. Sized for a full transcript's worth of distinct
 // styled lines: a 512-entry cache thrashes on long sessions, which forces
 // grapheme re-segmentation of the same lines on every animation frame.
-const WIDTH_CACHE_SIZE = 4096;
+const WIDTH_CACHE_SIZE = Number.parseInt(process.env.PI_WIDTH_CACHE ?? "", 10) || 4096;
+
+// TEMPORARY DIAGNOSTIC (local only, uncommitted). Counts width-cache traffic so
+// the LRU-thrash hypothesis can be confirmed against a real session instead of a
+// benchmark. Set PI_WIDTH_STATS=0 to disable. Writes /tmp/pi-width-stats.log.
+const WIDTH_STATS_ENABLED = process.env.PI_WIDTH_STATS !== "0";
+const widthStats = { calls: 0, ascii: 0, hits: 0, misses: 0, missMs: 0, lastFlush: Date.now() };
+function maybeFlushWidthStats(): void {
+	const now = Date.now();
+	if (now - widthStats.lastFlush < 1000) return;
+	widthStats.lastFlush = now;
+	const { calls, ascii, hits, misses, missMs } = widthStats;
+	if (calls === 0) return;
+	widthStats.calls = 0;
+	widthStats.ascii = 0;
+	widthStats.hits = 0;
+	widthStats.misses = 0;
+	widthStats.missMs = 0;
+	const hitRate = hits + misses > 0 ? ((hits / (hits + misses)) * 100).toFixed(1) : "n/a";
+	try {
+		__appendWidthStats(
+			"/tmp/pi-width-stats.log",
+			`[${new Date(now).toISOString()}] calls=${calls} ascii=${ascii} hits=${hits} misses=${misses} ` +
+				`hitRate=${hitRate}% missCost=${missMs.toFixed(1)}ms cacheSize=${widthCache.size}/${WIDTH_CACHE_SIZE}\n`,
+		);
+	} catch {}
+}
 // Image payload lines are megabytes long; caching them would retain far more
 // than the width values are worth.
 const WIDTH_CACHE_MAX_KEY_LENGTH = 4096;
@@ -247,8 +274,14 @@ export function visibleWidth(str: string): number {
 		return 0;
 	}
 
+	if (WIDTH_STATS_ENABLED) {
+		widthStats.calls++;
+		if ((widthStats.calls & 0x3fff) === 0) maybeFlushWidthStats();
+	}
+
 	// Fast path: pure ASCII printable
 	if (isPrintableAscii(str)) {
+		if (WIDTH_STATS_ENABLED) widthStats.ascii++;
 		return str.length;
 	}
 
@@ -257,8 +290,10 @@ export function visibleWidth(str: string): number {
 	if (cached !== undefined) {
 		widthCache.delete(str);
 		widthCache.set(str, cached);
+		if (WIDTH_STATS_ENABLED) widthStats.hits++;
 		return cached;
 	}
+	const __missT0 = WIDTH_STATS_ENABLED ? performance.now() : 0;
 
 	// Normalize: tabs to 3 spaces, strip ANSI escape codes
 	let clean = str;
@@ -298,6 +333,12 @@ export function visibleWidth(str: string): number {
 			}
 		}
 		widthCache.set(str, width);
+	}
+
+	if (WIDTH_STATS_ENABLED) {
+		widthStats.misses++;
+		widthStats.missMs += performance.now() - __missT0;
+		maybeFlushWidthStats();
 	}
 
 	return width;
@@ -1229,23 +1270,46 @@ export function sliceWithWidth(
 			continue;
 		}
 
-		let textEnd = i;
-		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		// Every ANSI sequence begins with ESC and extractAnsiCode rejects any other
+		// position immediately, so a single indexOf finds the run end. The previous
+		// per-character probe made this O(line length) function calls, which
+		// profiling showed dominating frame time on transcripts with long lines.
+		let textEnd = line.indexOf("\x1b", i);
+		if (textEnd === -1) textEnd = line.length;
 
-		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
-			const w = graphemeWidth(segment);
-			const inRange = currentCol >= startCol && currentCol < endCol;
-			const fits = !strict || currentCol + w <= endCol;
-			if (inRange && fits) {
-				if (pendingAnsi) {
-					result += pendingAnsi;
-					pendingAnsi = "";
+		const run = line.slice(i, textEnd);
+		if (isPrintableAscii(run)) {
+			// Printable ASCII is one column per character with no multi-code-point
+			// clusters, so grapheme segmentation is unnecessary here.
+			for (let k = 0; k < run.length; k++) {
+				const inRange = currentCol >= startCol && currentCol < endCol;
+				if (inRange) {
+					if (pendingAnsi) {
+						result += pendingAnsi;
+						pendingAnsi = "";
+					}
+					result += run[k];
+					resultWidth += 1;
 				}
-				result += segment;
-				resultWidth += w;
+				currentCol += 1;
+				if (currentCol >= endCol) break;
 			}
-			currentCol += w;
-			if (currentCol >= endCol) break;
+		} else {
+			for (const { segment } of graphemeSegmenter.segment(run)) {
+				const w = graphemeWidth(segment);
+				const inRange = currentCol >= startCol && currentCol < endCol;
+				const fits = !strict || currentCol + w <= endCol;
+				if (inRange && fits) {
+					if (pendingAnsi) {
+						result += pendingAnsi;
+						pendingAnsi = "";
+					}
+					result += segment;
+					resultWidth += w;
+				}
+				currentCol += w;
+				if (currentCol >= endCol) break;
+			}
 		}
 		i = textEnd;
 		if (currentCol >= endCol) break;

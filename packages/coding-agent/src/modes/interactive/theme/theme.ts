@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
+	CURSOR_BLINK_OFF,
+	CURSOR_BLINK_ON,
 	CURSOR_OUTLINE_OFF,
 	CURSOR_OUTLINE_ON,
 	type CursorRenderer,
@@ -869,8 +871,11 @@ function setGlobalTheme(t: Theme): void {
 
 /**
  * Cursor style for Editor/Input fake cursors.
- * - focused:   filled block in the theme's cursor color (reverse video on top
- *              of the cursor foreground, so the block takes the theme color)
+ * - focused:   blinking filled block in the theme's cursor color (reverse video
+ *              on top of the cursor foreground, so the block takes the theme
+ *              color). Blink is SGR 5, so the terminal drives the timing and
+ *              nothing has to repaint; terminals without blink show a steady
+ *              block.
  * - unfocused: outlined block - the cell keeps the terminal background and is
  *              bordered in the theme's cursor color (overline + underline; a
  *              text cell has no addressable left/right edges)
@@ -884,7 +889,7 @@ function createCursorRenderer(t: Theme): CursorRenderer {
 	}
 	return (grapheme: string, focused: boolean) =>
 		focused
-			? `${ansi}\x1b[7m${grapheme}\x1b[27m\x1b[39m`
+			? `${ansi}${CURSOR_BLINK_ON}\x1b[7m${grapheme}\x1b[27m${CURSOR_BLINK_OFF}\x1b[39m`
 			: `${ansi}${CURSOR_OUTLINE_ON}${grapheme}${CURSOR_OUTLINE_OFF}\x1b[39m`;
 }
 
