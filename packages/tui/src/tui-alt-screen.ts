@@ -739,6 +739,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const consumed = target.component.handleMouse?.({
 				x: event.x - target.rect.x,
 				y: event.y - target.rect.y,
+				width: target.rect.width,
 				button: event.button & 3,
 				action: "press",
 			});

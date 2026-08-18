@@ -36,6 +36,16 @@ export interface ComponentMouseEvent {
 	x: number;
 	/** Row relative to the component's layout box. */
 	y: number;
+	/**
+	 * Width of the layout box the coordinates are relative to.
+	 *
+	 * A component that renders decorated by a subclass or wrapper receives a
+	 * width smaller than this. Comparing the two recovers how far its own
+	 * content was shifted right, which no other information in the event
+	 * exposes. Containers pass this through unchanged because they lay children
+	 * out at full width.
+	 */
+	width: number;
 	/** Raw SGR button code with modifier/motion bits masked off (0 = left). */
 	button: number;
 	action: "press" | "release" | "drag";
@@ -327,6 +337,9 @@ export class Container implements Component {
 	 * testing. Row ranges are recovered from the per-child line arrays captured
 	 * during the last render, and `y` is rebased so each child still sees
 	 * coordinates local to itself.
+	 *
+	 * `x` and `width` pass through unchanged: children are laid out at the
+	 * container's full width and share its left edge.
 	 */
 	handleMouse(event: ComponentMouseEvent): boolean {
 		const childLines = this.renderCacheChildLines;

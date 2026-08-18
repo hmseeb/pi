@@ -305,6 +305,10 @@ export class Editor implements Component, Focusable {
 	// positions. Text rows start after the top border, hence the +1 in handleMouse.
 	private lastEffectivePaddingX: number = 0;
 	private lastVisibleLineCount: number = 0;
+	// Width this editor was last asked to render at. Compared against the width
+	// of the box that actually received the click to recover a decorator's
+	// horizontal origin shift (see getContentOriginX).
+	private lastRenderWidth: number = 0;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -516,6 +520,10 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		// Recorded for mouse hit-testing: a subclass that decorates the rendered
+		// lines calls super.render() with a reduced width, and the difference from
+		// the clicked box's width is the horizontal origin shift.
+		this.lastRenderWidth = width;
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
 		const contentWidth = Math.max(1, width - paddingX * 2);
@@ -665,6 +673,29 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
+	 * Horizontal offset, in columns, between the clicked layout box and this
+	 * editor's own content.
+	 *
+	 * A subclass may decorate the rendered lines by prepending columns — the
+	 * shipped example is a prompt icon (`❯ `) added by an extension — and does so
+	 * by calling `super.render()` with a reduced width and re-padding each line.
+	 * The base editor is never told about those columns, so a click arrives
+	 * already including them and the caret lands too far right by exactly the
+	 * prefix width.
+	 *
+	 * The shift is recovered from the widths: `boxWidth` is what the layout gave
+	 * the component, `lastRenderWidth` is what this editor was actually asked to
+	 * render at. The difference is attributed entirely to the left, which is what
+	 * a prefix decorator does — it reserves the columns up front and pads each
+	 * content row on the left only. A subclass that instead splits the reserved
+	 * columns across both sides should override this.
+	 */
+	protected getContentOriginX(boxWidth: number): number {
+		if (!Number.isFinite(boxWidth) || this.lastRenderWidth <= 0) return 0;
+		return Math.max(0, boxWidth - this.lastRenderWidth);
+	}
+
+	/**
 	 * Move the caret to a clicked position.
 	 *
 	 * Coordinates are box-local. The rendered box is laid out as:
@@ -694,7 +725,7 @@ export class Editor implements Component, Focusable {
 		const isLastSegmentOfLine =
 			visualIndex === visualLines.length - 1 || visualLines[visualIndex + 1]?.logicalLine !== vl.logicalLine;
 
-		const targetDisplayCol = event.x - this.lastEffectivePaddingX;
+		const targetDisplayCol = event.x - this.getContentOriginX(event.width) - this.lastEffectivePaddingX;
 		const offset = this.displayColumnToOffset(segmentText, targetDisplayCol, isLastSegmentOfLine);
 
 		this.state.cursorLine = vl.logicalLine;

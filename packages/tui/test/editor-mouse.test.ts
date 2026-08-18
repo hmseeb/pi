@@ -14,8 +14,8 @@ function createTestTUI(cols = 80, rows = 24): TUI {
 	return new TuiMainScreen(new VirtualTerminal(cols, rows));
 }
 
-function press(editor: Editor, x: number, y: number): boolean {
-	return editor.handleMouse({ x, y, button: 0, action: "press" });
+function press(editor: Editor, x: number, y: number, width = 40): boolean {
+	return editor.handleMouse({ x, y, width, button: 0, action: "press" });
 }
 
 /**
@@ -35,7 +35,7 @@ function findCursor(lines: string[]): { row: number; col: number } {
 /** Render, click, re-render, and report where the caret ended up. */
 function clickAt(editor: Editor, width: number, x: number, y: number): { row: number; col: number; consumed: boolean } {
 	editor.render(width);
-	const consumed = press(editor, x, y);
+	const consumed = press(editor, x, y, width);
 	return { ...findCursor(editor.render(width)), consumed };
 }
 
@@ -160,9 +160,9 @@ describe("editor mouse click-to-position", () => {
 		editor.setText("hello world");
 		editor.render(40);
 
-		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, button: 2, action: "press" }), false);
-		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, button: 0, action: "drag" }), false);
-		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, button: 0, action: "release" }), false);
+		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, width: 40, button: 2, action: "press" }), false);
+		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, width: 40, button: 0, action: "drag" }), false);
+		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, width: 40, button: 0, action: "release" }), false);
 	});
 
 	it("keeps the caret out of the interior of a collapsed paste marker", () => {
@@ -178,7 +178,7 @@ describe("editor mouse click-to-position", () => {
 
 		editor.render(60);
 		// Click a few columns into the marker body.
-		press(editor, markerStart + 3, 1);
+		press(editor, markerStart + 3, 1, 60);
 		const cursor = findCursor(editor.render(60));
 
 		// The caret must sit at the marker start (or before it), never inside.
@@ -186,6 +186,100 @@ describe("editor mouse click-to-position", () => {
 			cursor.col <= markerStart,
 			`caret at ${cursor.col} should not be inside the marker starting at ${markerStart}`,
 		);
+	});
+});
+
+/**
+ * Editor subclass that decorates its own output, mirroring the shipped
+ * `slash-command-colors` extension: render at a reduced width, then prepend a
+ * prompt icon to the first text row and matching blanks to the rest.
+ */
+class PromptIconEditor extends Editor {
+	override render(width: number): string[] {
+		const innerWidth = Math.max(1, width - 2);
+		const lines = super.render(innerWidth);
+		let firstContentLine = true;
+		return lines.map((line, index) => {
+			const isBorder = index === 0 || index === lines.length - 1;
+			if (isBorder) return line + "\u2500".repeat(2);
+			const prefix = firstContentLine ? "\u276f " : "  ";
+			firstContentLine = false;
+			return prefix + line;
+		});
+	}
+}
+
+describe("editor click with a decorated horizontal origin", () => {
+	// Regression: a decorating subclass shifts its content right, but the click
+	// arrived in box coordinates that still included the prefix, so the caret
+	// landed exactly prefixWidth columns too far right. Verified live against the
+	// real TUI: clicking screen column 2 (the first character) produced offset 2.
+	it("places the caret on the clicked character despite a prompt prefix", () => {
+		const boxWidth = 40;
+		const editor = new PromptIconEditor(createTestTUI(boxWidth), defaultEditorTheme);
+		editor.focused = true;
+		editor.setText("abcdefghijklmnop");
+
+		const rendered = editor.render(boxWidth);
+		const prefixWidth = 2;
+		assert.ok(rendered[1]!.startsWith("\u276f "), "decorated row should start with the prompt icon");
+
+		// Clicking the Nth text character means clicking box column prefixWidth + N.
+		for (const target of [0, 5, 10, 16]) {
+			editor.render(boxWidth);
+			assert.strictEqual(press(editor, prefixWidth + target, 1, boxWidth), true);
+			const cursor = findCursor(editor.render(boxWidth));
+			assert.strictEqual(
+				cursor.col,
+				prefixWidth + target,
+				`click on text column ${target} should put the caret there, not ${cursor.col - prefixWidth}`,
+			);
+		}
+	});
+
+	it("keeps an undecorated editor unaffected", () => {
+		// The origin shift is derived from the width difference, so an editor that
+		// renders at the full box width must resolve to a zero shift.
+		const editor = new Editor(createTestTUI(40), defaultEditorTheme);
+		editor.focused = true;
+		editor.setText("hello world");
+
+		const result = clickAt(editor, 40, 4, 1);
+		assert.strictEqual(result.col, 4);
+	});
+
+	it("resolves wide graphemes relative to the shifted origin", () => {
+		const boxWidth = 40;
+		const prefixWidth = 2;
+		const editor = new PromptIconEditor(createTestTUI(boxWidth), defaultEditorTheme);
+		editor.focused = true;
+		editor.setText("ab\u2705cd");
+
+		// Emoji occupies text columns 2-3, i.e. box columns 4-5.
+		editor.render(boxWidth);
+		press(editor, prefixWidth + 2, 1, boxWidth);
+		assert.strictEqual(findCursor(editor.render(boxWidth)).col, prefixWidth + 2, "left half snaps to emoji start");
+
+		editor.render(boxWidth);
+		press(editor, prefixWidth + 3, 1, boxWidth);
+		assert.strictEqual(findCursor(editor.render(boxWidth)).col, prefixWidth + 4, "right half snaps past the emoji");
+	});
+
+	it("positions the caret on a wrapped continuation row under a prefix", () => {
+		const boxWidth = 14;
+		const prefixWidth = 2;
+		const editor = new PromptIconEditor(createTestTUI(boxWidth), defaultEditorTheme);
+		editor.focused = true;
+		editor.setText("aaaa bbbb cccc dddd");
+
+		const lines = editor.render(boxWidth);
+		assert.ok(lines.length - 2 >= 2, "text should occupy at least two visual rows");
+
+		editor.render(boxWidth);
+		assert.strictEqual(press(editor, prefixWidth + 1, 2, boxWidth), true);
+		const cursor = findCursor(editor.render(boxWidth));
+		assert.strictEqual(cursor.row, 2, "caret should stay on the clicked visual row");
+		assert.strictEqual(cursor.col, prefixWidth + 1);
 	});
 });
 
@@ -210,6 +304,7 @@ describe("layout mouse routing", () => {
 		const consumed = target.component.handleMouse?.({
 			x: 5 - target.rect.x,
 			y: 2 - target.rect.y,
+			width: target.rect.width,
 			button: 0,
 			action: "press",
 		});
@@ -236,7 +331,13 @@ describe("layout mouse routing", () => {
 		let consumed = false;
 		for (const target of targets) {
 			if (
-				target.component.handleMouse?.({ x: 5 - target.rect.x, y: 2 - target.rect.y, button: 0, action: "press" })
+				target.component.handleMouse?.({
+					x: 5 - target.rect.x,
+					y: 2 - target.rect.y,
+					width: target.rect.width,
+					button: 0,
+					action: "press",
+				})
 			) {
 				consumed = true;
 				break;
