@@ -25,13 +25,18 @@ export function isClipboardImagePath(filePath: string): boolean {
 /**
  * Replace pasted-clipboard temp paths with short `[Image #N]` chips for display.
  * Numbering restarts per call, matching what the editor showed before submit.
+ * `decorate` receives the chip label and the temp path it hides, so callers can
+ * style the chip and link it back to the file.
  */
-export function collapseClipboardImagePaths(text: string, decorate?: (label: string) => string): string {
+export function collapseClipboardImagePaths(
+	text: string,
+	decorate?: (label: string, filePath: string) => string,
+): string {
 	let n = 0;
-	return text.replace(CLIPBOARD_IMAGE_PATH_REGEX, () => {
+	return text.replace(CLIPBOARD_IMAGE_PATH_REGEX, (filePath) => {
 		n++;
 		const label = `[Image #${n}]`;
-		return decorate ? decorate(label) : label;
+		return decorate ? decorate(label, filePath) : label;
 	});
 }
 

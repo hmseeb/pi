@@ -1,4 +1,3 @@
-import { appendFileSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 import {
 	AltScreenSearchComponent,
@@ -11,13 +10,11 @@ import { ScrollView } from "./components/scroll-view.ts";
 import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
-	flushLayoutStats,
 	getMouseTargetsAt,
 	getScrollbarGeometry,
 	getScrollViewBox,
 	getScrollViewsAt,
 	type LayoutFrame,
-	markLayoutFrame,
 	renderLayoutFrame,
 	type ScrollbarGeometry,
 } from "./layout.ts";
@@ -182,87 +179,6 @@ export interface TuiAltScreenOptions {
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
-// TEMPORARY DIAGNOSTIC (local, uncommitted). Per-second summary of what the alt
-// screen actually pushes at the terminal. Set PI_ALT_STATS=0 to disable.
-const ALT_STATS_ENABLED = process.env.PI_ALT_STATS !== "0";
-const altStats = { frames: 0, bytes: 0, maxBytes: 0, rows: 0, fullRedraws: 0, height: 0, lastFlush: Date.now() };
-function recordAltScreenFrame(bytes: number, rows: number, height: number, fullRedraw: boolean): void {
-	if (!ALT_STATS_ENABLED) return;
-	altStats.frames++;
-	altStats.bytes += bytes;
-	altStats.rows += rows;
-	altStats.height = height;
-	if (bytes > altStats.maxBytes) altStats.maxBytes = bytes;
-	if (fullRedraw) altStats.fullRedraws++;
-	const now = Date.now();
-	if (now - altStats.lastFlush < 1000) return;
-	const elapsed = (now - altStats.lastFlush) / 1000;
-	altStats.lastFlush = now;
-	try {
-		appendFileSync(
-			"/tmp/pi-alt-stats.log",
-			`[${new Date(now).toISOString()}] fps=${(altStats.frames / elapsed).toFixed(1)} ` +
-				`bytesOut=${(altStats.bytes / 1024).toFixed(0)}KB maxFrame=${(altStats.maxBytes / 1024).toFixed(1)}KB ` +
-				`rowsRedrawn=${altStats.rows} height=${altStats.height} fullRedraws=${altStats.fullRedraws}\n`,
-		);
-	} catch {}
-	altStats.frames = 0;
-	altStats.bytes = 0;
-	altStats.maxBytes = 0;
-	altStats.rows = 0;
-	altStats.fullRedraws = 0;
-}
-
-// TEMPORARY DIAGNOSTIC: split the opaque "diff+write" window into phases so the
-// 60ms-per-frame cost can be attributed. Slow frames are logged individually.
-const phaseStats = {
-	n: 0,
-	layout: 0,
-	composite: 0,
-	post: 0,
-	write: 0,
-	passes: 0,
-	slowLogged: 0,
-	lastFlush: Date.now(),
-};
-function recordAltScreenPhases(layout: number, composite: number, post: number, write: number, passes: number): void {
-	if (!ALT_STATS_ENABLED) return;
-	phaseStats.n++;
-	phaseStats.layout += layout;
-	phaseStats.composite += composite;
-	phaseStats.post += post;
-	phaseStats.write += write;
-	phaseStats.passes += passes;
-	const total = layout + composite + post + write;
-	try {
-		if (total >= 25 && phaseStats.slowLogged < 5) {
-			phaseStats.slowLogged++;
-			appendFileSync(
-				"/tmp/pi-alt-stats.log",
-				`  SLOWFRAME total=${total.toFixed(1)}ms layout=${layout.toFixed(1)} composite=${composite.toFixed(1)} ` +
-					`post=${post.toFixed(1)} write=${write.toFixed(1)} layoutPasses=${passes}\n`,
-			);
-		}
-		const now = Date.now();
-		if (now - phaseStats.lastFlush < 1000) return;
-		phaseStats.lastFlush = now;
-		const n = Math.max(1, phaseStats.n);
-		appendFileSync(
-			"/tmp/pi-alt-stats.log",
-			`  PHASES/frame layout=${(phaseStats.layout / n).toFixed(1)}ms composite=${(phaseStats.composite / n).toFixed(1)}ms ` +
-				`post=${(phaseStats.post / n).toFixed(1)}ms write=${(phaseStats.write / n).toFixed(1)}ms ` +
-				`avgLayoutPasses=${(phaseStats.passes / n).toFixed(2)} frames=${phaseStats.n}\n`,
-		);
-		phaseStats.n = 0;
-		phaseStats.layout = 0;
-		phaseStats.composite = 0;
-		phaseStats.post = 0;
-		phaseStats.write = 0;
-		phaseStats.passes = 0;
-		phaseStats.slowLogged = 0;
-	} catch {}
-}
-
 export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	readonly mode = "fullscreen" as const;
 	// Every frame ends with a CUP to the CURSOR_MARKER position, so an unfocused
@@ -1492,16 +1408,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
-		const __tLayout = performance.now();
-		markLayoutFrame();
 		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
-		let __layoutPasses = 1;
 		if (this.refreshSearch(nextLayout)) {
 			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
-			__layoutPasses = 2;
 		}
-		const __msLayout = performance.now() - __tLayout;
-		const __tComposite = performance.now();
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);
 		screen = this.compositeOverlays(screen, width, height);
@@ -1510,8 +1420,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeScrollAffordances(screen, width, height, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
 
-		const __msComposite = performance.now() - __tComposite;
-		const __tPost = performance.now();
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => {
 			if (isImageLine(line) || visibleWidth(line) <= width) return line;
@@ -1531,8 +1439,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? this.prepareKittyScreen(screen)
 				: { lines: screen, evictedImageDeletion: "" };
 
-		const __msPost = performance.now() - __tPost;
-		const __tWrite = performance.now();
 		let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
@@ -1559,18 +1465,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			buffer += "\x1b[?25l";
 		}
 		buffer += END_SYNCHRONIZED_OUTPUT;
-		// TEMPORARY DIAGNOSTIC (local, uncommitted): the base profiler only counts
-		// bytes for TuiMainScreen, so fullscreen mode reports bytesOut=0 and the
-		// decisive number is invisible. Feed the same counter from here.
-		this.perfBytes += buffer.length;
-		{
-			const rowsRedrawn = fullRedraw
-				? height
-				: screen.reduce((n, line, row) => n + (line === this.previousScreen[row] ? 0 : 1), 0);
-			recordAltScreenFrame(buffer.length, rowsRedrawn, height, fullRedraw);
-			recordAltScreenPhases(__msLayout, __msComposite, __msPost, performance.now() - __tWrite, __layoutPasses);
-			flushLayoutStats();
-		}
 		this.terminal.write(buffer);
 
 		this.previousScreen = screen;

@@ -1,5 +1,6 @@
 import { Box, Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import { linkPath } from "../../../core/tools/render-utils.ts";
 import { collapseClipboardImagePaths } from "../../../utils/clipboard-image.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
@@ -10,6 +11,17 @@ import { CachedLineMap } from "./render-cache.ts";
 const OSC133_ZONE_START = "\x1b]133;A;u\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
+
+/**
+ * Extracts the escape sequence a style function emits before its content, so it
+ * can be re-applied after a nested style resets the foreground color.
+ */
+function stylePrefixOf(style: (text: string) => string): string {
+	const sentinel = "\u0000";
+	const styled = style(sentinel);
+	const index = styled.indexOf(sentinel);
+	return index >= 0 ? styled.slice(0, index) : "";
+}
 
 /**
  * Component that renders a user message
@@ -43,14 +55,22 @@ export class UserMessageComponent extends Container {
 	private rebuild(): void {
 		this.clear();
 		const contentBox = new Box(this.outputPad, 1, (content: string) => theme.bg("userMessageBg", content));
+		const textColor = (content: string) => theme.fg("userMessageText", content);
+		// Keep pasted-image chips accent-colored and clickable after submit, matching
+		// how the editor rendered them; re-open the message color afterwards because
+		// the chip resets the foreground.
+		const textPrefix = stylePrefixOf(textColor);
+		const cwd = process.cwd();
+		const decorateImageChip = (label: string, filePath: string): string =>
+			linkPath(theme.fg("accent", label), filePath, cwd) + textPrefix;
 		contentBox.addChild(
 			new Markdown(
-				collapseClipboardImagePaths(this.text),
+				collapseClipboardImagePaths(this.text, decorateImageChip),
 				0,
 				0,
 				this.markdownTheme,
 				{
-					color: (content: string) => theme.fg("userMessageText", content),
+					color: textColor,
 				},
 				{
 					preserveOrderedListMarkers: true,
