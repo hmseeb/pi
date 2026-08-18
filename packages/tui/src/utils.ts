@@ -349,6 +349,61 @@ export function getGraphemeCellRange(line: string, column: number): GraphemeCell
 	return undefined;
 }
 
+/**
+ * Remove OSC 8 hyperlink markers from a line.
+ *
+ * Terminals such as Ghostty draw their own underline on OSC 8 spans, which
+ * fights the theme's own link styling. Rendering strips the markers from the
+ * bytes sent to the terminal while the retained screen model keeps them, so
+ * pi still resolves clicks itself.
+ */
+export function stripOsc8(line: string): string {
+	return line.replace(/\x1b\]8;[^;]*;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
+}
+
+/** A hyperlink span resolved to visible terminal columns. */
+export interface Osc8Span {
+	url: string;
+	startCol: number;
+	endCol: number;
+}
+
+/**
+ * Return the OSC 8 hyperlink covering a visible terminal column together with
+ * the column range it spans, so callers can draw their own hover affordance.
+ */
+export function getOsc8SpanAtColumn(line: string, column: number): Osc8Span | undefined {
+	let activeUrl: string | undefined;
+	let activeStart = 0;
+	let currentCol = 0;
+	let i = 0;
+	let hit: { url: string; startCol: number } | undefined;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			const hyperlink = /^\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)$/.exec(ansi.code);
+			if (hyperlink) {
+				if (hit) return { url: hit.url, startCol: hit.startCol, endCol: currentCol };
+				activeUrl = hyperlink[1] || undefined;
+				activeStart = currentCol;
+			}
+			i += ansi.length;
+			continue;
+		}
+		let textEnd = i;
+		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
+			const width = segment === "\t" ? 3 : graphemeWidth(segment);
+			if (!hit && activeUrl && column >= currentCol && column < currentCol + width) {
+				hit = { url: activeUrl, startCol: activeStart };
+			}
+			currentCol += width;
+		}
+		i = textEnd;
+	}
+	return hit ? { url: hit.url, startCol: hit.startCol, endCol: currentCol } : undefined;
+}
+
 /** Return the OSC 8 hyperlink covering a visible terminal column. */
 export function getOsc8LinkAtColumn(line: string, column: number): string | undefined {
 	let activeUrl: string | undefined;

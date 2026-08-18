@@ -469,7 +469,7 @@ export class Markdown implements Component {
 				// the default text style.
 				let headingStyleFn: (text: string) => string;
 				if (headingLevel === 1) {
-					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.underline(text)));
+					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(text));
 				} else {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(text));
 				}
@@ -688,7 +688,7 @@ export class Markdown implements Component {
 
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
-					const styledLink = this.theme.link(this.theme.underline(linkText));
+					const styledLink = this.theme.link(linkText);
 					if (getCapabilities().hyperlinks) {
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
 						// so we always show only the link text regardless of whether it matches href.

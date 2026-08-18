@@ -1412,10 +1412,10 @@ bar`,
 			assert.ok(afterCodeIndex > 0, "Should contain text after inline code");
 
 			const precedingChunk = joinedOutput.slice(Math.max(0, afterCodeIndex - 40), afterCodeIndex);
-			// H1 uses heading + bold + underline
+			// H1 uses heading + bold (no underline)
 			assert.ok(precedingChunk.includes("\x1b[1m"), `Should re-apply bold for h1: ${precedingChunk}`);
 			assert.ok(precedingChunk.includes("\x1b[36m"), `Should re-apply cyan for h1: ${precedingChunk}`);
-			assert.ok(precedingChunk.includes("\x1b[4m"), `Should re-apply underline for h1: ${precedingChunk}`);
+			assert.ok(!precedingChunk.includes("\x1b[4m"), `Should not underline h1: ${precedingChunk}`);
 		});
 
 		it("should not leak h1 underline into padding when inline code is the last token", async () => {
