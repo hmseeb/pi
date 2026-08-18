@@ -2,12 +2,16 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
+	CURSOR_OUTLINE_OFF,
+	CURSOR_OUTLINE_ON,
+	type CursorRenderer,
 	type EditorTheme,
 	getCapabilities,
 	type MarkdownTheme,
 	type RgbColor,
 	type SelectListTheme,
 	type SettingsListTheme,
+	setCursorRenderer,
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { type Static, Type } from "typebox";
@@ -35,6 +39,8 @@ const ThemeJsonSchema = Type.Object({
 	colors: Type.Object({
 		// Core UI (10 colors)
 		accent: ColorValueSchema,
+		// Text cursor (optional, defaults to accent)
+		cursor: Type.Optional(ColorValueSchema),
 		border: ColorValueSchema,
 		borderAccent: ColorValueSchema,
 		borderMuted: ColorValueSchema,
@@ -111,6 +117,7 @@ const validateThemeJson = Compile(ThemeJsonSchema);
 
 export type ThemeColor =
 	| "accent"
+	| "cursor"
 	| "border"
 	| "borderAccent"
 	| "borderMuted"
@@ -168,7 +175,7 @@ export type ThemeBg =
 	| "toolSuccessBg"
 	| "toolErrorBg";
 
-type OptionalThemeColor = "thinkingMax" | "searchMatchText";
+type OptionalThemeColor = "thinkingMax" | "searchMatchText" | "cursor";
 type OptionalThemeBg = "scrollbarThumb" | "searchMatchBg";
 
 type ColorMode = "truecolor" | "256color";
@@ -333,9 +340,11 @@ function withThemeColorFallbacks(colors: ThemeJson["colors"]): ThemeJson["colors
 	scrollbarThumb: ColorValue;
 	searchMatchBg: ColorValue;
 	searchMatchText: ColorValue;
+	cursor: ColorValue;
 } {
 	return {
 		...colors,
+		cursor: colors.cursor ?? colors.accent,
 		thinkingMax: colors.thinkingMax ?? colors.thinkingXhigh,
 		scrollbarThumb: colors.scrollbarThumb ?? colors.selectedBg,
 		searchMatchBg: colors.searchMatchBg ?? colors.selectedBg,
@@ -370,6 +379,7 @@ export class Theme {
 		this.fgColors = new Map();
 		const colors = {
 			...fgColors,
+			cursor: fgColors.cursor ?? fgColors.accent,
 			thinkingMax: fgColors.thinkingMax ?? fgColors.thinkingXhigh,
 			searchMatchText: fgColors.searchMatchText ?? fgColors.text,
 		};
@@ -854,6 +864,28 @@ export const theme: Theme = new Proxy({} as Theme, {
 function setGlobalTheme(t: Theme): void {
 	(globalThis as Record<symbol, Theme>)[THEME_KEY] = t;
 	(globalThis as Record<symbol, Theme>)[THEME_KEY_OLD] = t;
+	setCursorRenderer(createCursorRenderer(t));
+}
+
+/**
+ * Cursor style for Editor/Input fake cursors.
+ * - focused:   filled block in the theme's cursor color (reverse video on top
+ *              of the cursor foreground, so the block takes the theme color)
+ * - unfocused: outlined block - the cell keeps the terminal background and is
+ *              bordered in the theme's cursor color (overline + underline; a
+ *              text cell has no addressable left/right edges)
+ */
+function createCursorRenderer(t: Theme): CursorRenderer {
+	let ansi: string;
+	try {
+		ansi = t.getFgAnsi("cursor");
+	} catch {
+		ansi = t.getFgAnsi("accent");
+	}
+	return (grapheme: string, focused: boolean) =>
+		focused
+			? `${ansi}\x1b[7m${grapheme}\x1b[27m\x1b[39m`
+			: `${ansi}${CURSOR_OUTLINE_ON}${grapheme}${CURSOR_OUTLINE_OFF}\x1b[39m`;
 }
 
 let currentThemeName: string | undefined;
@@ -1321,6 +1353,8 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		selectList: getSelectListTheme(),
+		markerColor: (text: string) => theme.fg("accent", text),
+		markerInvalidColor: (text: string) => theme.fg("error", text),
 	};
 }
 

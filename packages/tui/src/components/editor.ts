@@ -1,4 +1,5 @@
 import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
+import { renderCursor } from "../cursor.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -18,11 +19,14 @@ import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "
 const graphemeSegmenter = getGraphemeSegmenter();
 const wordSegmenter = getWordSegmenter();
 
-/** Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`. */
-const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
+/** Marker kinds that collapse hidden content behind a short atomic label. */
+const MARKER_KINDS = ["paste", "Image"] as const;
+
+/** Regex matching markers like `[paste #1 +123 lines]`, `[paste #2 1234 chars]`, `[Image #1]`. */
+const PASTE_MARKER_REGEX = /\[(paste|Image) #(\d+)( [^\]]*)?\]/g;
 
 /** Non-global version for single-segment testing. */
-const PASTE_MARKER_SINGLE = /^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$/;
+const PASTE_MARKER_SINGLE = /^\[(paste|Image) #(\d+)( [^\]]*)?\]$/;
 
 /** Check if a segment is a paste marker (i.e. was merged by segmentWithMarkers). */
 function isPasteMarker(segment: string): boolean {
@@ -42,14 +46,14 @@ function segmentWithMarkers(
 	validIds: Set<number>,
 ): Iterable<Intl.SegmentData> {
 	// Fast path: no paste markers in the text or no valid IDs.
-	if (validIds.size === 0 || !text.includes("[paste #")) {
+	if (validIds.size === 0 || !MARKER_KINDS.some((kind) => text.includes(`[${kind} #`))) {
 		return baseSegmenter.segment(text);
 	}
 
 	// Find all marker spans with valid IDs.
 	const markers: Array<{ start: number; end: number }> = [];
 	for (const m of text.matchAll(PASTE_MARKER_REGEX)) {
-		const id = Number.parseInt(m[1]!, 10);
+		const id = Number.parseInt(m[2]!, 10);
 		if (!validIds.has(id)) continue;
 		markers.push({ start: m.index, end: m.index + m[0].length });
 	}
@@ -228,6 +232,10 @@ interface LayoutLine {
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
+	/** Colors collapsed markers such as `[paste #1 +20 lines]` and `[Image #1]`. */
+	markerColor?: (str: string) => string;
+	/** Colors marker-shaped text with no backing content (e.g. hand-typed `[Image #9]`). */
+	markerInvalidColor?: (str: string) => string;
 }
 
 export interface EditorOptions {
@@ -267,6 +275,15 @@ function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, w
 	return sliceByColumn(indicator, 0, indicatorWidth, true) + ellipsis;
 }
 
+/** Draws a label into a horizontal border, e.g. `─── shell mode ─────`. */
+function createLabelBorder(label: string, width: number): string {
+	const availableWidth = Math.max(0, width);
+	const indicator = `─── ${label} `;
+	const remaining = availableWidth - visibleWidth(indicator);
+	if (remaining >= 0) return indicator + "─".repeat(remaining);
+	return sliceByColumn(indicator, 0, availableWidth, true);
+}
+
 export class Editor implements Component, Focusable {
 	private state: EditorState = {
 		lines: [""],
@@ -289,6 +306,18 @@ export class Editor implements Component, Focusable {
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
+
+	// Optional color applied to collapsed paste/image markers
+	public markerColor?: (str: string) => string;
+
+	// Optional color applied to marker-shaped text with no backing content
+	public markerInvalidColor?: (str: string) => string;
+
+	// Optional sticky foreground ANSI applied to all editor text (e.g. shell mode)
+	public textAnsi?: string;
+
+	// Optional label drawn into the top border (e.g. "shell mode")
+	public borderLabel?: string;
 
 	// Autocomplete support
 	private autocompleteProvider?: AutocompleteProvider;
@@ -346,6 +375,8 @@ export class Editor implements Component, Focusable {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
+		this.markerColor = theme.markerColor;
+		this.markerInvalidColor = theme.markerInvalidColor;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
@@ -526,6 +557,8 @@ export class Editor implements Component, Focusable {
 		if (this.scrollOffset > 0) {
 			const border = createScrollBorder("↑", this.scrollOffset, width);
 			result.push(this.borderColor(border));
+		} else if (this.borderLabel) {
+			result.push(this.borderColor(createLabelBorder(this.borderLabel, width)));
 		} else {
 			result.push(horizontal.repeat(width));
 		}
@@ -555,12 +588,12 @@ export class Editor implements Component, Focusable {
 					const afterGraphemes = [...this.segment(after, "grapheme")];
 					const firstGrapheme = afterGraphemes[0]?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
+					const cursor = renderCursor(firstGrapheme, this.focused);
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
 					// Cursor is at the end - add highlighted space
-					const cursor = "\x1b[7m \x1b[0m";
+					const cursor = renderCursor(" ", this.focused);
 					displayText = before + marker + cursor;
 					lineVisibleWidth = lineVisibleWidth + 1;
 					// If cursor overflows content width into the padding, flag it
@@ -568,6 +601,28 @@ export class Editor implements Component, Focusable {
 						cursorInPadding = true;
 					}
 				}
+			}
+
+			// Colorize collapsed markers. Safe here because lineVisibleWidth was
+			// measured before, and ANSI adds zero visible width. A marker under the
+			// cursor is already ANSI-split and simply stays uncolored.
+			if (this.markerColor || this.markerInvalidColor) {
+				const paint = this.markerColor;
+				const paintInvalid = this.markerInvalidColor;
+				displayText = displayText.replace(PASTE_MARKER_REGEX, (marker, _kind, id) => {
+					// Hand-typed markers have no entry in `pastes` and expand to nothing,
+					// so flag them instead of dressing them up as a real attachment.
+					const color = this.pastes.has(Number.parseInt(id, 10)) ? paint : paintInvalid;
+					return color ? color(marker) : marker;
+				});
+			}
+
+			// Sticky mode color. Re-applying it after every inner foreground reset
+			// lets marker and cursor colors nest without losing the mode color for
+			// the rest of the line.
+			if (this.textAnsi) {
+				const ansi = this.textAnsi;
+				displayText = `${ansi}${displayText.replaceAll("\x1b[39m", ansi)}\x1b[39m`;
 			}
 
 			// Calculate padding based on actual visible width
@@ -997,7 +1052,7 @@ export class Editor implements Component, Focusable {
 	private expandPasteMarkers(text: string): string {
 		let result = text;
 		for (const [pasteId, pasteContent] of this.pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
+			const markerRegex = new RegExp(`\\[(?:paste|Image) #${pasteId}( [^\\]]*)?\\]`, "g");
 			result = result.replace(markerRegex, () => pasteContent);
 		}
 		return result;
@@ -1045,6 +1100,23 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
 		this.insertTextAtCursorInternal(text);
+	}
+
+	/**
+	 * Insert a collapsed marker (e.g. `[Image #1]`) that hides `content` from the
+	 * rendered prompt but expands back to it on submit / getExpandedText().
+	 * Used for clipboard image paths so the editor is not flooded with tmp paths.
+	 */
+	insertHiddenAtCursor(content: string, kind: string = "Image"): void {
+		if (!content) return;
+		this.cancelAutocomplete();
+		this.pushUndoSnapshot();
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		this.pasteCounter++;
+		const id = this.pasteCounter;
+		this.pastes.set(id, content);
+		this.insertTextAtCursorInternal(`[${kind} #${id}]`);
 	}
 
 	/**
@@ -1304,7 +1376,7 @@ export class Editor implements Component, Focusable {
 
 			if (isPastedSegmented) {
 				// This contains the id part e.g 4 from [paste #4 +123 lines]
-				const targetId = Number(isPastedSegmented[1]);
+				const targetId = Number(isPastedSegmented[2]);
 				this.pastes.delete(targetId);
 				this.pasteCounter--;
 
@@ -1319,10 +1391,10 @@ export class Editor implements Component, Focusable {
 
 				// Renumber markers with ids greater than the removed one.
 				this.state.lines = this.state.lines.map((line) =>
-					line.replace(PASTE_MARKER_REGEX, (fullMatch, idGroup, suffixGroup) => {
+					line.replace(PASTE_MARKER_REGEX, (fullMatch, kindGroup, idGroup, suffixGroup) => {
 						const x = Number(idGroup);
 						if (x <= targetId) return fullMatch;
-						return `[paste #${x - 1}${suffixGroup}]`;
+						return `[${kindGroup} #${x - 1}${suffixGroup ?? ""}]`;
 					}),
 				);
 			}

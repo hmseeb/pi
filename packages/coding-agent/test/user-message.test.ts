@@ -3,7 +3,7 @@ import { UserMessageComponent } from "../src/modes/interactive/components/user-m
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
-const OSC133_ZONE_START = "\x1b]133;A\x07";
+const OSC133_ZONE_START = "\x1b]133;A;u\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const BG_RESET = "\x1b[49m";

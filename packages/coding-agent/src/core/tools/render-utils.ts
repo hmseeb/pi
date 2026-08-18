@@ -4,6 +4,7 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@earendil-works/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
+import { isClipboardImagePath } from "../../utils/clipboard-image.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 
@@ -81,5 +82,9 @@ export function renderToolPath(
 	if (rawPath === null) return invalidArgText(theme);
 	const value = rawPath || options?.emptyFallback;
 	if (!value) return theme.fg("toolOutput", "...");
+	// Pasted clipboard images are opaque tmp paths; show a short chip instead.
+	if (isClipboardImagePath(value)) {
+		return linkPath(theme.fg("accent", "[Image]"), value, cwd);
+	}
 	return linkPath(theme.fg("accent", shortenPath(value)), value, cwd);
 }

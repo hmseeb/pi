@@ -1,6 +1,18 @@
 import { open } from "node:fs/promises";
 
 const IMAGE_TYPE_SNIFF_BYTES = 4100;
+
+const IMAGE_FILE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp"]);
+
+/**
+ * Extension-only image check for render code, which is synchronous and cannot
+ * sniff file contents. Prefer detectSupportedImageMimeTypeFromFile elsewhere.
+ */
+export function hasImageFileExtension(filePath: string): boolean {
+	const dot = filePath.lastIndexOf(".");
+	if (dot < 0) return false;
+	return IMAGE_FILE_EXTENSIONS.has(filePath.slice(dot + 1).toLowerCase());
+}
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 export function detectSupportedImageMimeType(buffer: Uint8Array): string | null {

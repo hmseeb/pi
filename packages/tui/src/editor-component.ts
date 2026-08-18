@@ -47,6 +47,12 @@ export interface EditorComponent extends Component {
 	insertTextAtCursor?(text: string): void;
 
 	/**
+	 * Insert a collapsed marker (e.g. `[Image #1]`) hiding `content`, which is
+	 * restored by getExpandedText() / on submit.
+	 */
+	insertHiddenAtCursor?(content: string, kind?: string): void;
+
+	/**
 	 * Get text with any markers expanded (e.g., paste markers).
 	 * Falls back to getText() if not implemented.
 	 */
@@ -65,6 +71,12 @@ export interface EditorComponent extends Component {
 
 	/** Border color function */
 	borderColor?: (str: string) => string;
+
+	/** Sticky foreground ANSI applied to all editor text (e.g. shell mode). */
+	textAnsi?: string;
+
+	/** Label drawn into the editor's top border (e.g. "shell mode"). */
+	borderLabel?: string;
 
 	/** Set horizontal padding */
 	setPaddingX?(padding: number): void;

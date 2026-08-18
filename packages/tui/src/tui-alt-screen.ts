@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import {
 	AltScreenSearchComponent,
 	type AltScreenSearchMatch,
@@ -23,6 +24,7 @@ import {
 	deleteKittyImage,
 	getCapabilities,
 	getKittyImagePlacement,
+	hyperlink,
 	type ImageProtocol,
 	isImageLine,
 	setCapabilities,
@@ -59,8 +61,17 @@ const FOCUS_IN = "\x1b[I";
 const FOCUS_OUT = "\x1b[O";
 const BEGIN_SYNCHRONIZED_OUTPUT = "\x1b[?2026h";
 const END_SYNCHRONIZED_OUTPUT = "\x1b[?2026l";
-const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
-const OSC133_PROMPT_START = /^\x1b\]133;A(?:\x07|\x1b\\)/;
+const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:;[^\x07\x1b]*)?(?:\x07|\x1b\\))+/;
+const OSC133_PROMPT_START = /^\x1b\]133;A(?:;[^\x07\x1b]*)?(?:\x07|\x1b\\)/;
+/** Prompt zones opened by a user message specifically (`133;A;u`). */
+const OSC133_USER_PROMPT_START = /^\x1b\]133;A;u(?:\x07|\x1b\\)/;
+
+/** Internal OSC 8 targets for the scroll affordances. Never opened in a browser. */
+const SCROLL_LINK_BOTTOM = "pi-scroll:bottom";
+const SCROLL_LINK_PROMPT = "pi-scroll:prompt:";
+const JUMP_TO_BOTTOM_LABEL = " Jump to bottom (click) ↓ ";
+/** How far past a prompt marker to look for the prompt's first line of text. */
+const PROMPT_SUMMARY_SCAN_ROWS = 8;
 const PAGE_SCROLL_OVERLAP = 4;
 const MAX_CACHED_OFFSCREEN_KITTY_IMAGES = 16;
 const MAX_CACHED_OFFSCREEN_KITTY_TRANSMISSION_BYTES = 32 * 1024 * 1024;
@@ -160,11 +171,18 @@ export interface TuiAltScreenOptions {
 	copySelection?: (text: string) => Promise<boolean>;
 	/** Handle a successful text-selection copy. Return true to suppress the default flash. */
 	onSelectionCopied?: (text: string) => boolean;
+	/** Style the click-to-follow chip shown while scrolled up. */
+	jumpToBottomStyle?: (text: string) => string;
+	/** Style the sticky header naming the prompt above the viewport. */
+	stickyPromptStyle?: (text: string) => string;
 }
 
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
 export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	readonly mode = "fullscreen" as const;
+	// Every frame ends with a CUP to the CURSOR_MARKER position, so an unfocused
+	// terminal can draw its own hollow cursor there instead of a fake block.
+	protected override readonly positionsHardwareCursor = true;
 	readonly [VIEWPORT_TUI] = true as const;
 	private previousScreen: string[] = [];
 	private lastDocument: string[] = [];
@@ -201,6 +219,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly onRightClickPaste?: () => void;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
 	private readonly onSelectionCopied?: (text: string) => boolean;
+	private readonly jumpToBottomStyle?: (text: string) => string;
+	private readonly stickyPromptStyle?: (text: string) => string;
 
 	constructor(
 		terminal: Terminal,
@@ -225,6 +245,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copySelection = options.copySelection;
 		this.onSelectionCopied = options.onSelectionCopied;
+		this.jumpToBottomStyle = options.jumpToBottomStyle;
+		this.stickyPromptStyle = options.stickyPromptStyle;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -971,6 +993,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					? this.pressedUrl
 					: undefined;
 			this.pressedUrl = undefined;
+			if (clickedUrl && this.handleScrollLink(clickedUrl)) {
+				this.selectionAnchor = undefined;
+				this.selectionFocus = undefined;
+				this.requestRender();
+				return;
+			}
 			if (clickedUrl && this.openUrl) {
 				this.selectionAnchor = undefined;
 				this.selectionFocus = undefined;
@@ -1245,6 +1273,94 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data) || (data.length === 6 && data.startsWith("\x1b[M"));
 	}
 
+	/**
+	 * First line of text inside a prompt zone. The zone-start marker sits on the
+	 * component's top padding row, which is blank, so scan forward to the first
+	 * row that actually carries text.
+	 */
+	private getPromptSummary(lines: readonly string[], promptRow: number): string {
+		const limit = Math.min(lines.length, promptRow + PROMPT_SUMMARY_SCAN_ROWS);
+		for (let row = promptRow; row < limit; row++) {
+			const line = lines[row] ?? "";
+			if (row > promptRow && OSC133_PROMPT_START.test(line)) break;
+			const plain = stripVTControlCharacters(line).replace(/\s+/g, " ").trim();
+			if (plain) return plain;
+		}
+		return "";
+	}
+
+	/**
+	 * Row of the nearest user prompt at or above the current scroll position.
+	 * Assistant messages open prompt zones too, so match the `;u` variant only.
+	 */
+	private findPromptRowAbove(scrollView: ScrollView, layout: LayoutFrame): number | undefined {
+		const lines = getScrollViewBox(layout, scrollView)?.scrollContentLines;
+		if (!lines || lines.length === 0) return undefined;
+		for (let row = Math.min(scrollView.scrollTop, lines.length - 1); row >= 0; row--) {
+			if (OSC133_USER_PROMPT_START.test(lines[row] ?? "")) return row;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Composite the scrolled-up affordances: a sticky header naming the prompt
+	 * above the viewport, and a click-to-follow chip on the last content row.
+	 * Both are OSC 8 links; clicks resolve against the composited screen, so they
+	 * work even though these lines are not part of the layout.
+	 */
+	private compositeScrollAffordances(screen: string[], width: number, height: number, layout: LayoutFrame): string[] {
+		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
+		if (scrollView.isFollowingEnd) return screen;
+		const box = getScrollViewBox(layout, scrollView);
+		if (!box || box.rect.height <= 0) return screen;
+
+		const result = [...screen];
+		while (result.length < height) result.push("");
+
+		const topRow = box.rect.y;
+		const bottomRow = Math.min(height, box.rect.y + box.rect.height) - 1;
+
+		const promptRow = this.findPromptRowAbove(scrollView, layout);
+		if (promptRow !== undefined && promptRow < scrollView.scrollTop && topRow >= 0 && topRow < height) {
+			const plain = this.getPromptSummary(box.scrollContentLines ?? [], promptRow);
+			if (plain) {
+				const label = sliceByColumn(plain, 0, Math.max(0, width - 1), true).padEnd(width, " ");
+				const styled = this.stickyPromptStyle ? this.stickyPromptStyle(label) : label;
+				result[topRow] = hyperlink(styled, `${SCROLL_LINK_PROMPT}${promptRow}`);
+			}
+		}
+
+		if (bottomRow >= 0 && bottomRow < height && width > JUMP_TO_BOTTOM_LABEL.length) {
+			const chipWidth = visibleWidth(JUMP_TO_BOTTOM_LABEL);
+			const styled = this.jumpToBottomStyle ? this.jumpToBottomStyle(JUMP_TO_BOTTOM_LABEL) : JUMP_TO_BOTTOM_LABEL;
+			result[bottomRow] = compositeTuiLine(
+				result[bottomRow] ?? "",
+				hyperlink(styled, SCROLL_LINK_BOTTOM),
+				Math.max(0, Math.floor((width - chipWidth) / 2)),
+				chipWidth,
+				width,
+			);
+		}
+
+		return result;
+	}
+
+	/** Resolve an internal scroll link. Returns false for ordinary URLs. */
+	private handleScrollLink(url: string): boolean {
+		if (url === SCROLL_LINK_BOTTOM) {
+			this.scrollToBottom();
+			return true;
+		}
+		if (url.startsWith(SCROLL_LINK_PROMPT)) {
+			const row = Number.parseInt(url.slice(SCROLL_LINK_PROMPT.length), 10);
+			if (Number.isFinite(row)) {
+				this.getPrimaryScrollView().scrollTo(Math.max(0, row), { disableFollow: true });
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private compositeFlashes(screen: string[], width: number, height: number): string[] {
 		const flashLines = this.flashes.render(width).slice(-height);
 		if (flashLines.length === 0) return screen;
@@ -1273,6 +1389,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
 		screen = this.applySelection(screen, nextLayout);
+		screen = this.compositeScrollAffordances(screen, width, height, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
 
 		const cursorPos = this.extractCursorPosition(screen, height);

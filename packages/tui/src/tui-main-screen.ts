@@ -56,6 +56,9 @@ export interface TuiMainScreenRenderState {
 /** TUI implementation that renders into the terminal's main screen and scrollback. */
 export class TuiMainScreen extends TuiBase implements TUI {
 	readonly mode = "regular" as const;
+	// Main screen parks the real terminal cursor on CURSOR_MARKER every render,
+	// so an unfocused terminal can draw its own hollow cursor there.
+	protected override readonly positionsHardwareCursor = true;
 	private previousLines: string[] = [];
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;

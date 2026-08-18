@@ -42,6 +42,20 @@ export {
 	type StackOptions,
 	VStack,
 } from "./components/v-stack.ts";
+// Cursor styling (shared by Editor/Input fake cursors)
+export {
+	CURSOR_OUTLINE_OFF,
+	CURSOR_OUTLINE_ON,
+	type CursorRenderer,
+	getCursorRenderer,
+	hasRenderedCursor,
+	isHardwareHollowCursorEnabled,
+	isTerminalFocused,
+	renderCursor,
+	setCursorRenderer,
+	setHardwareHollowCursor,
+	setTerminalFocused,
+} from "./cursor.ts";
 // Editor component interface (for custom editors)
 export type { EditorComponent } from "./editor-component.ts";
 // Fuzzy matching

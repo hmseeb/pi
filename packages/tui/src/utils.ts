@@ -47,8 +47,13 @@ const terminalSpacingMarkRegex =
 	/^(?:[\p{Spacing_Mark}--[\u1734\u302E\u302F]]|[\u065F\u0F7F\u102B\u102C\u1031\u1033-\u1035\u1038\u103A-\u103E])+$/v;
 const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
-// Cache for non-ASCII strings
-const WIDTH_CACHE_SIZE = 512;
+// Cache for non-ASCII strings. Sized for a full transcript's worth of distinct
+// styled lines: a 512-entry cache thrashes on long sessions, which forces
+// grapheme re-segmentation of the same lines on every animation frame.
+const WIDTH_CACHE_SIZE = 4096;
+// Image payload lines are megabytes long; caching them would retain far more
+// than the width values are worth.
+const WIDTH_CACHE_MAX_KEY_LENGTH = 4096;
 const widthCache = new Map<string, number>();
 
 export const cjkBreakRegex =
@@ -247,9 +252,11 @@ export function visibleWidth(str: string): number {
 		return str.length;
 	}
 
-	// Check cache
+	// Check cache (re-insert on hit so eviction is LRU rather than insertion order)
 	const cached = widthCache.get(str);
 	if (cached !== undefined) {
+		widthCache.delete(str);
+		widthCache.set(str, cached);
 		return cached;
 	}
 
@@ -282,14 +289,16 @@ export function visibleWidth(str: string): number {
 		width += graphemeWidth(segment);
 	}
 
-	// Cache result
-	if (widthCache.size >= WIDTH_CACHE_SIZE) {
-		const firstKey = widthCache.keys().next().value;
-		if (firstKey !== undefined) {
-			widthCache.delete(firstKey);
+	// Cache result (least-recently-used entry is first in insertion order)
+	if (str.length <= WIDTH_CACHE_MAX_KEY_LENGTH) {
+		if (widthCache.size >= WIDTH_CACHE_SIZE) {
+			const firstKey = widthCache.keys().next().value;
+			if (firstKey !== undefined) {
+				widthCache.delete(firstKey);
+			}
 		}
+		widthCache.set(str, width);
 	}
-	widthCache.set(str, width);
 
 	return width;
 }

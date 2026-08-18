@@ -5,6 +5,14 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
+import {
+	beginCursorFrame,
+	hasRenderedCursor,
+	isHardwareHollowCursorEnabled,
+	isTerminalFocused,
+	setHardwareHollowCursor,
+	setTerminalFocused,
+} from "./cursor.ts";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
 import {
@@ -210,36 +218,74 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
  */
 export class Container implements Component {
 	children: Component[] = [];
+	private renderCacheWidth: number | undefined;
+	private renderCacheChildLines: string[][] | undefined;
+	private renderCacheLines: string[] | undefined;
 
 	addChild(component: Component): void {
 		this.children.push(component);
+		this.clearRenderCache();
 	}
 
 	removeChild(component: Component): void {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			this.clearRenderCache();
 		}
 	}
 
 	clear(): void {
 		this.children = [];
+		this.clearRenderCache();
 	}
 
 	invalidate(): void {
+		this.clearRenderCache();
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
 	}
 
+	protected clearRenderCache(): void {
+		this.renderCacheWidth = undefined;
+		this.renderCacheChildLines = undefined;
+		this.renderCacheLines = undefined;
+	}
+
+	/**
+	 * Concatenate child output, reusing the previous array when no child
+	 * re-rendered. Components cache their own lines and return the same array
+	 * reference while unchanged, so identity comparison is enough to detect a
+	 * repeat frame. Without this, every animation frame rebuilds an array of the
+	 * whole document and callers that post-process the result (hyperlinking,
+	 * width measurement) redo that work for every line on every frame.
+	 *
+	 * Callers must treat the result as read-only; mutate a copy instead.
+	 */
 	render(width: number): string[] {
+		const childCount = this.children.length;
+		const childLines: string[][] = new Array(childCount);
+		let reusable =
+			this.renderCacheLines !== undefined &&
+			this.renderCacheWidth === width &&
+			this.renderCacheChildLines?.length === childCount;
+		for (let i = 0; i < childCount; i++) {
+			const lines = this.children[i]!.render(width);
+			childLines[i] = lines;
+			if (reusable && this.renderCacheChildLines![i] !== lines) reusable = false;
+		}
+		if (reusable) return this.renderCacheLines!;
+
 		const lines: string[] = [];
-		for (const child of this.children) {
-			const childLines = child.render(width);
-			for (const line of childLines) {
+		for (let i = 0; i < childCount; i++) {
+			for (const line of childLines[i]!) {
 				lines.push(line);
 			}
 		}
+		this.renderCacheWidth = width;
+		this.renderCacheChildLines = childLines;
+		this.renderCacheLines = lines;
 		return lines;
 	}
 }
@@ -248,6 +294,12 @@ export class Container implements Component {
  * TUI - Main class for managing terminal UI with differential rendering
  */
 const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
+
+// DECSET 1004 focus reporting: terminal reports window/pane focus changes.
+const ENABLE_FOCUS_REPORTING = "\x1b[?1004h";
+const DISABLE_FOCUS_REPORTING = "\x1b[?1004l";
+const FOCUS_IN = "\x1b[I";
+const FOCUS_OUT = "\x1b[O";
 
 /** Composite overlay content into a terminal line at a fixed column. */
 export function compositeTuiLine(
@@ -330,6 +382,8 @@ export function isViewportTUI(tui: TUI): tui is ViewportTUI {
 
 export abstract class TuiBase extends Container implements TUI {
 	abstract readonly mode: TuiMode;
+	/** True when this TUI positions the hardware cursor on the caret each render. */
+	protected readonly positionsHardwareCursor: boolean = false;
 	public terminal: Terminal;
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<TuiInputListener>();
@@ -369,7 +423,32 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 	}
 
+	/**
+	 * The root render result is post-processed in place (cursor marker stripping,
+	 * line resets), so it must not be a shared cached array. Roots hold a handful
+	 * of children, so skipping Container's cache costs nothing.
+	 */
+	override render(width: number): string[] {
+		const lines: string[] = [];
+		for (const child of this.children) {
+			for (const line of child.render(width)) {
+				lines.push(line);
+			}
+		}
+		return lines;
+	}
+
 	protected abstract doRender(): void;
+
+	/**
+	 * Per-frame cursor bookkeeping. `positionsHardwareCursor` is a subclass
+	 * capability: only a TUI that parks the real cursor on CURSOR_MARKER can
+	 * delegate the unfocused hollow cursor to the terminal.
+	 */
+	private beginRenderFrame(): void {
+		setHardwareHollowCursor(this.positionsHardwareCursor);
+		beginCursorFrame();
+	}
 
 	protected resetRenderState(): void {}
 
@@ -386,6 +465,9 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	getShowHardwareCursor(): boolean {
+		// While the terminal is unfocused the fake cursor stands down and the real
+		// cursor takes over, so the terminal can draw its native hollow box.
+		if (!isTerminalFocused() && isHardwareHollowCursorEnabled()) return true;
 		return this.showHardwareCursor;
 	}
 
@@ -704,6 +786,10 @@ export abstract class TuiBase extends Container implements TUI {
 		);
 		this.afterTerminalStart();
 		this.terminal.hideCursor();
+		// Focus reporting: terminal sends ESC[I / ESC[O when the window/pane gains
+		// or loses focus, so the fake cursor can hollow out while unfocused.
+		setTerminalFocused(true);
+		this.terminal.write(ENABLE_FOCUS_REPORTING);
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031h");
 		}
@@ -752,6 +838,8 @@ export abstract class TuiBase extends Container implements TUI {
 	stop(options: TuiStopOptions = {}): void {
 		this.stopped = true;
 		this.cancelRenderTimer();
+		this.terminal.write(DISABLE_FOCUS_REPORTING);
+		setTerminalFocused(true);
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
@@ -766,6 +854,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.renderRequested = false;
 		this.cancelRenderTimer();
 		this.lastRenderAt = performance.now();
+		this.beginRenderFrame();
 		this.doRender();
 	}
 
@@ -793,6 +882,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.cancelRenderTimer();
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
+			this.beginRenderFrame();
 			this.doRender();
 		});
 	}
@@ -816,6 +906,7 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
+			this.beginRenderFrame();
 			this.doRender();
 			if (this.renderRequested) {
 				this.scheduleRender();
@@ -824,6 +915,14 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private handleTerminalInput(data: string): void {
+		// Track window focus before listeners run (alt screen also uses ESC[O to
+		// clear in-flight selections), and swallow the event afterwards.
+		const isFocusEvent = data === FOCUS_IN || data === FOCUS_OUT;
+		if (isFocusEvent) {
+			setTerminalFocused(data === FOCUS_IN);
+			// Only repaint when something on screen actually depends on focus.
+			if (hasRenderedCursor()) this.requestRender();
+		}
 		if (this.consumeOsc11BackgroundResponse(data)) {
 			return;
 		}
@@ -846,6 +945,11 @@ export abstract class TuiBase extends Container implements TUI {
 				return;
 			}
 			data = current;
+		}
+
+		// Focus events are not key input - never forward them to components.
+		if (isFocusEvent) {
+			return;
 		}
 
 		// Consume terminal cell size responses without blocking unrelated input.

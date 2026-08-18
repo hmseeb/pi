@@ -9,7 +9,7 @@ import { getReadmePath } from "../../config.ts";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import { processImage } from "../../utils/image-process.ts";
-import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
+import { detectSupportedImageMimeTypeFromFile, hasImageFileExtension } from "../../utils/mime.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
@@ -78,8 +78,11 @@ function formatReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): st
 }
 
 function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd: string): string {
-	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
-	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
+	const rawPath = str(args?.file_path ?? args?.path);
+	const pathDisplay = renderToolPath(rawPath, theme, cwd);
+	// Images are looked at, not read; the verb should match what actually happens.
+	const verb = rawPath && hasImageFileExtension(rawPath) ? "view" : "read";
+	return `${theme.fg("toolTitle", theme.bold(verb))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
 }
 
 function trimTrailingEmptyLines(lines: string[]): string[] {

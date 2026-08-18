@@ -172,7 +172,8 @@ Every theme must define all 51 required color tokens. The optional tokens preser
 
 | Token | Purpose |
 |-------|---------|
-| `accent` | Primary accent (logo, selected items, cursor) |
+| `accent` | Primary accent (logo, selected items) |
+| `cursor` | Text cursor color (optional, defaults to `accent`). Filled block when the input is focused, underlined/unfilled when it is not |
 | `border` | Normal borders |
 | `borderAccent` | Highlighted borders |
 | `borderMuted` | Subtle borders (editor) |

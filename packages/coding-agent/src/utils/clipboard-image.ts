@@ -14,6 +14,27 @@ export type ClipboardImage = {
 
 const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
 
+/** Matches temp files written by handleClipboardPaste (`pi-clipboard-<uuid>.<ext>`). */
+const CLIPBOARD_IMAGE_PATH_REGEX = /\S*pi-clipboard-[0-9a-fA-F-]{36}\.(?:png|jpe?g|webp|gif)/g;
+
+/** True when `filePath` is a temp file created by pasting an image into the editor. */
+export function isClipboardImagePath(filePath: string): boolean {
+	return new RegExp(CLIPBOARD_IMAGE_PATH_REGEX.source).test(filePath);
+}
+
+/**
+ * Replace pasted-clipboard temp paths with short `[Image #N]` chips for display.
+ * Numbering restarts per call, matching what the editor showed before submit.
+ */
+export function collapseClipboardImagePaths(text: string, decorate?: (label: string) => string): string {
+	let n = 0;
+	return text.replace(CLIPBOARD_IMAGE_PATH_REGEX, () => {
+		n++;
+		const label = `[Image #${n}]`;
+		return decorate ? decorate(label) : label;
+	});
+}
+
 const DEFAULT_LIST_TIMEOUT_MS = 1000;
 const DEFAULT_READ_TIMEOUT_MS = 3000;
 const DEFAULT_POWERSHELL_TIMEOUT_MS = 5000;

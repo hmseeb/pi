@@ -91,7 +91,11 @@
 			"properties": {
 				"accent": {
 					"$ref": "#/$defs/colorValue",
-					"description": "Primary accent color (logo, selected items, cursor)"
+					"description": "Primary accent color (logo, selected items)"
+				},
+				"cursor": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Text cursor color (optional, defaults to accent)"
 				},
 				"border": {
 					"$ref": "#/$defs/colorValue",

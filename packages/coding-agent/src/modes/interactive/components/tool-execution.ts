@@ -20,6 +20,7 @@ import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { CachedLineMap } from "./render-cache.ts";
 
 const FALLBACK_PREVIEW_LINES = 10;
 
@@ -29,6 +30,15 @@ export interface ToolExecutionOptions {
 }
 
 export const TOOL_LINK_PREFIX = "pi-tool:";
+
+/** Reference-equality check for the per-part source arrays of a render. */
+function sameArrayRefs(a: string[][] | undefined, b: string[][]): boolean {
+	if (!a || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
 
 function hyperlinkContent(line: string, url: string): string {
 	if (isImageLine(line)) return line;
@@ -41,6 +51,16 @@ function hyperlinkContent(line: string, url: string): string {
 }
 
 export class ToolExecutionComponent extends Container {
+	/**
+	 * Hyperlinking rewrites every line through grapheme-level slicing, which is
+	 * the single most expensive thing the transcript does per frame. The source
+	 * lines are reference-stable while nothing changed, so cache the result and
+	 * only redo the pass when the underlying lines or width actually change.
+	 */
+	private readonly linkCache = new CachedLineMap();
+	private selfRenderCacheParts: string[][] | undefined;
+	private selfRenderCacheWidth: number | undefined;
+	private selfRenderCacheLines: string[] | undefined;
 	private contentBox: Box;
 	private contentText: Text;
 	private selfRenderContainer: Container;
@@ -258,8 +278,16 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override invalidate(): void {
+		this.clearRenderCaches();
 		super.invalidate();
 		this.updateDisplay();
+	}
+
+	private clearRenderCaches(): void {
+		this.linkCache.clear();
+		this.selfRenderCacheWidth = undefined;
+		this.selfRenderCacheParts = undefined;
+		this.selfRenderCacheLines = undefined;
 	}
 
 	override render(width: number): string[] {
@@ -274,6 +302,8 @@ export class ToolExecutionComponent extends Container {
 				return [];
 			}
 
+			// Track the source arrays so an unchanged frame reuses the assembly.
+			const parts: string[][] = [contentLines];
 			lines = [];
 			if (contentLines.length > 0) {
 				lines.push("");
@@ -282,12 +312,27 @@ export class ToolExecutionComponent extends Container {
 			for (let i = 0; i < this.imageComponents.length; i++) {
 				const spacer = this.imageSpacers[i];
 				if (spacer) {
-					lines.push(...spacer.render(width));
+					const spacerLines = spacer.render(width);
+					parts.push(spacerLines);
+					lines.push(...spacerLines);
 				}
 				const imageComponent = this.imageComponents[i];
 				if (imageComponent) {
-					lines.push(...imageComponent.render(width));
+					const imageLines = imageComponent.render(width);
+					parts.push(imageLines);
+					lines.push(...imageLines);
 				}
+			}
+			if (
+				this.selfRenderCacheLines !== undefined &&
+				this.selfRenderCacheWidth === width &&
+				sameArrayRefs(this.selfRenderCacheParts, parts)
+			) {
+				lines = this.selfRenderCacheLines;
+			} else {
+				this.selfRenderCacheWidth = width;
+				this.selfRenderCacheParts = parts;
+				this.selfRenderCacheLines = lines;
 			}
 		} else {
 			lines = super.render(width);
@@ -295,7 +340,7 @@ export class ToolExecutionComponent extends Container {
 
 		if (!isViewportTUI(this.ui) || process.env.TERM_PROGRAM === "Orca") return lines;
 		const url = `${TOOL_LINK_PREFIX}${encodeURIComponent(this.toolCallId)}`;
-		return lines.map((line) => hyperlinkContent(line, url));
+		return this.linkCache.map(width, lines, (source) => source.map((line) => hyperlinkContent(line, url)));
 	}
 
 	private updateDisplay(): void {

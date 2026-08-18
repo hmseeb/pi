@@ -212,6 +212,9 @@ function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionE
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
+/** Turn-starting message sent after a `!?` shell command. */
+const BASH_ASK_PROMPT = "Respond to the output of the shell command above.";
+
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -363,6 +366,8 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				}
 			},
 			onSelectionCopied: options.onSelectionCopied,
+			jumpToBottomStyle: (text: string) => theme.bg("userMessageBg", theme.fg("accent", text)),
+			stickyPromptStyle: (text: string) => theme.bg("userMessageBg", theme.fg("dim", text)),
 		};
 		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, altScreenOptions);
 	}
@@ -478,6 +483,10 @@ export class InteractiveMode {
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
+	// Track if that bash command is hidden from the agent (text starts with !!)
+	private isBashExcluded = false;
+	// Track if that bash command should also start an agent turn (text starts with !?)
+	private isBashAsk = false;
 
 	// Track current bash execution component
 	private bashComponent: BashExecutionComponent | undefined = undefined;
@@ -947,6 +956,7 @@ export class InteractiveMode {
 				rawKeyHint("/", "for commands"),
 				rawKeyHint("!", "to run bash"),
 				rawKeyHint("!!", "to run bash (no context)"),
+				rawKeyHint("!?", "to run bash and ask the agent"),
 				hint("app.message.followUp", "to queue follow-up"),
 				hint("app.message.dequeue", "to edit all queued messages"),
 				hint("app.clipboard.pasteImage", "to paste image (with text fallback)"),
@@ -2872,8 +2882,17 @@ export class InteractiveMode {
 
 		this.defaultEditor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
-			this.isBashMode = text.trimStart().startsWith("!");
-			if (wasBashMode !== this.isBashMode) {
+			const wasBashExcluded = this.isBashExcluded;
+			const wasBashAsk = this.isBashAsk;
+			const trimmed = text.trimStart();
+			this.isBashMode = trimmed.startsWith("!");
+			this.isBashExcluded = trimmed.startsWith("!!");
+			this.isBashAsk = trimmed.startsWith("!?");
+			if (
+				wasBashMode !== this.isBashMode ||
+				wasBashExcluded !== this.isBashExcluded ||
+				wasBashAsk !== this.isBashAsk
+			) {
 				this.updateEditorBorderColor();
 			}
 		};
@@ -2909,7 +2928,13 @@ export class InteractiveMode {
 				const filePath = path.join(tmpDir, fileName);
 				fs.writeFileSync(filePath, Buffer.from(image.bytes));
 
-				this.editor.insertTextAtCursor?.(filePath);
+				// Show a compact `[Image #N]` chip instead of the raw tmp path; the
+				// real path is restored when the prompt is submitted.
+				if (this.editor.insertHiddenAtCursor) {
+					this.editor.insertHiddenAtCursor(filePath, "Image");
+				} else {
+					this.editor.insertTextAtCursor?.(filePath);
+				}
 				this.ui.requestRender();
 				return;
 			}
@@ -3067,7 +3092,8 @@ export class InteractiveMode {
 			// Handle bash command (! for normal, !! for excluded from context)
 			if (text.startsWith("!")) {
 				const isExcluded = text.startsWith("!!");
-				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
+				const isAsk = !isExcluded && text.startsWith("!?");
+				const command = isExcluded || isAsk ? text.slice(2).trim() : text.slice(1).trim();
 				if (command) {
 					if (this.session.isBashRunning) {
 						this.showWarning("A bash command is already running. Press Esc to cancel it first.");
@@ -3077,7 +3103,13 @@ export class InteractiveMode {
 					this.editor.addToHistory?.(text);
 					await this.handleBashCommand(command, isExcluded);
 					this.isBashMode = false;
+					this.isBashExcluded = false;
+					this.isBashAsk = false;
 					this.updateEditorBorderColor();
+					// `!?` shares the output like `!`, then starts a turn on top of it.
+					if (isAsk) {
+						await this.submitDerivedInput(BASH_ASK_PROMPT);
+					}
 					return;
 				}
 			}
@@ -4069,10 +4101,22 @@ export class InteractiveMode {
 
 	private updateEditorBorderColor(): void {
 		if (this.isBashMode) {
-			this.editor.borderColor = theme.getBashModeBorderColor();
+			// Recolor the whole field and label the border so shell input never
+			// reads like a normal prompt. `!!` is hidden from the agent, so it gets
+			// the same dim treatment BashExecutionComponent uses for excluded runs.
+			const token = this.isBashExcluded ? "dim" : this.isBashAsk ? "accent" : "bashMode";
+			this.editor.borderColor = (str: string) => theme.fg(token, str);
+			this.editor.textAnsi = theme.getFgAnsi(token);
+			this.editor.borderLabel = this.isBashExcluded
+				? "shell command · output hidden from agent"
+				: this.isBashAsk
+					? "shell command · agent responds to the output"
+					: "shell command · output shared with agent";
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
+			this.editor.textAnsi = undefined;
+			this.editor.borderLabel = undefined;
 		}
 		this.ui.requestRender();
 	}
@@ -6275,6 +6319,7 @@ export class InteractiveMode {
 | \`/\` | Slash commands |
 | \`!\` | Run bash command |
 | \`!!\` | Run bash command (excluded from context) |
+| \`!?\` | Run bash command and have the agent respond to the output |
 `;
 
 		// Add extension-registered shortcuts
@@ -6371,6 +6416,31 @@ export class InteractiveMode {
 	private checkDaxnutsEasterEgg(model: { provider: string; id: string }): void {
 		if (model.provider === "opencode" && model.id.toLowerCase().includes("kimi-k2.5")) {
 			this.handleDaxnuts();
+		}
+	}
+
+	/**
+	 * Submit text as a normal user turn without touching editor text or history.
+	 * Used by `!?`, where the visible input was the shell command, not this text.
+	 */
+	private async submitDerivedInput(text: string): Promise<void> {
+		if (this.session.isCompacting) {
+			this.queueCompactionMessage(text, "steer");
+			return;
+		}
+
+		if (this.session.isStreaming) {
+			await this.session.prompt(text, { streamingBehavior: "steer" });
+			this.updatePendingMessagesDisplay();
+			this.ui.requestRender();
+			return;
+		}
+
+		this.flushPendingBashComponents();
+		if (this.onInputCallback) {
+			this.onInputCallback(text);
+		} else {
+			this.pendingUserInputs.push(text);
 		}
 	}
 
