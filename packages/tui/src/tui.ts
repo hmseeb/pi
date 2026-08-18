@@ -2,6 +2,7 @@
  * Minimal TUI implementation with differential rendering
  */
 
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -429,16 +430,144 @@ export abstract class TuiBase extends Container implements TUI {
 	 * of children, so skipping Container's cache costs nothing.
 	 */
 	override render(width: number): string[] {
+		const perf = this.perfEnabled ? performance.now() : 0;
 		const lines: string[] = [];
 		for (const child of this.children) {
 			for (const line of child.render(width)) {
 				lines.push(line);
 			}
 		}
+		if (this.perfEnabled) this.perfTreeMs += performance.now() - perf;
 		return lines;
 	}
 
 	protected abstract doRender(): void;
+
+	// ---------------------------------------------------------------------
+	// Render profiler. ON by default so lag can be diagnosed after the fact.
+	// Set PI_PERF=0 to disable.
+	//
+	// Cost control: the profiler must never itself cause the lag it measures.
+	// Log lines are buffered in memory and flushed with a single appendFileSync
+	// at most once per second, never from inside a frame. Slow-frame lines are
+	// capped per window so a pathological session cannot spam the disk.
+	// ---------------------------------------------------------------------
+	protected readonly perfEnabled = process.env.PI_PERF !== "0";
+	private static readonly PERF_SLOW_FRAME_MS = 8;
+	private static readonly PERF_MAX_SLOW_LINES_PER_WINDOW = 5;
+	private static readonly PERF_MAX_LOG_BYTES = 5 * 1024 * 1024;
+	protected perfTreeMs = 0;
+	protected perfBytes = 0;
+	private perfFrames = 0;
+	private perfTotalMs = 0;
+	private perfMaxMs = 0;
+	private perfFullRedraws = 0;
+	private perfWindowStart = 0;
+	private perfLastLineCount = 0;
+	private perfPending: string[] = [];
+	private perfSlowLinesThisWindow = 0;
+	private perfSlowSuppressed = 0;
+	private perfLogPath: string | undefined;
+
+	protected perfNoteBytes(data: string): void {
+		if (this.perfEnabled) this.perfBytes += data.length;
+	}
+
+	protected perfNoteLineCount(count: number): void {
+		if (this.perfEnabled) this.perfLastLineCount = count;
+	}
+
+	private runRenderFrame(): void {
+		this.beginRenderFrame();
+		if (!this.perfEnabled) {
+			this.doRender();
+			return;
+		}
+		const startedAt = performance.now();
+		const redrawsBefore = this.fullRedrawCount;
+		this.perfTreeMs = 0;
+		this.perfBytes = 0;
+		this.doRender();
+		const frameMs = performance.now() - startedAt;
+		this.perfFrames++;
+		this.perfTotalMs += frameMs;
+		if (frameMs > this.perfMaxMs) this.perfMaxMs = frameMs;
+		this.perfFullRedraws += this.fullRedrawCount - redrawsBefore;
+		const treeMs = this.perfTreeMs;
+		const bytes = this.perfBytes;
+		this.perfWindowBytes += bytes;
+		this.perfWindowTreeMs += treeMs;
+		if (frameMs >= TuiBase.PERF_SLOW_FRAME_MS) {
+			if (this.perfSlowLinesThisWindow < TuiBase.PERF_MAX_SLOW_LINES_PER_WINDOW) {
+				this.perfSlowLinesThisWindow++;
+				this.perfWrite(
+					`SLOW frame=${frameMs.toFixed(1)}ms tree=${treeMs.toFixed(1)}ms ` +
+						`diff+write=${(frameMs - treeMs).toFixed(1)}ms bytes=${bytes} lines=${this.perfLastLineCount}` +
+						`${this.fullRedrawCount > redrawsBefore ? " FULL_REDRAW" : ""}`,
+				);
+			} else {
+				this.perfSlowSuppressed++;
+			}
+		}
+		const now = performance.now();
+		if (this.perfWindowStart === 0) this.perfWindowStart = now;
+		if (now - this.perfWindowStart >= 1000) {
+			// Only worth a line when something actually happened this second.
+			const noteworthy =
+				this.perfFullRedraws > 0 ||
+				this.perfMaxMs >= TuiBase.PERF_SLOW_FRAME_MS ||
+				this.perfWindowBytes > 512 * 1024;
+			if (noteworthy) {
+				this.perfWrite(
+					`1s frames=${this.perfFrames} avg=${(this.perfTotalMs / this.perfFrames).toFixed(2)}ms ` +
+						`max=${this.perfMaxMs.toFixed(1)}ms tree=${this.perfWindowTreeMs.toFixed(0)}ms ` +
+						`fullRedraws=${this.perfFullRedraws} bytesOut=${(this.perfWindowBytes / 1024).toFixed(0)}KB ` +
+						`lines=${this.perfLastLineCount}` +
+						`${this.perfSlowSuppressed > 0 ? ` (+${this.perfSlowSuppressed} more slow frames)` : ""}`,
+				);
+			}
+			this.perfFrames = 0;
+			this.perfTotalMs = 0;
+			this.perfMaxMs = 0;
+			this.perfFullRedraws = 0;
+			this.perfWindowBytes = 0;
+			this.perfWindowTreeMs = 0;
+			this.perfSlowLinesThisWindow = 0;
+			this.perfSlowSuppressed = 0;
+			this.perfWindowStart = now;
+			this.perfFlush();
+		}
+	}
+
+	private perfWindowBytes = 0;
+	private perfWindowTreeMs = 0;
+
+	/** Queue a profiler line. Never touches the filesystem; see perfFlush(). */
+	protected perfWrite(message: string): void {
+		if (!this.perfEnabled) return;
+		this.perfPending.push(`[${new Date().toISOString()}] ${message}\n`);
+	}
+
+	/** Flush queued profiler lines in one syscall. Called at most once per second. */
+	protected perfFlush(): void {
+		if (this.perfPending.length === 0) return;
+		const batch = this.perfPending.join("");
+		this.perfPending = [];
+		try {
+			if (this.perfLogPath === undefined) {
+				this.perfLogPath = path.join(this.logDirectory, "pi-perf.log");
+				fs.mkdirSync(path.dirname(this.perfLogPath), { recursive: true });
+				// Rotate once at startup if the previous log grew too large.
+				const size = fs.statSync(this.perfLogPath, { throwIfNoEntry: false })?.size ?? 0;
+				if (size > TuiBase.PERF_MAX_LOG_BYTES) {
+					fs.renameSync(this.perfLogPath, `${this.perfLogPath}.1`);
+				}
+			}
+			fs.appendFileSync(this.perfLogPath, batch);
+		} catch {
+			// profiling must never break the TUI
+		}
+	}
 
 	/**
 	 * Per-frame cursor bookkeeping. `positionsHardwareCursor` is a subclass
@@ -847,6 +976,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.terminal.showCursor();
 		this.terminal.stop();
 		this.afterTerminalStop(options);
+		this.perfFlush();
 	}
 
 	renderNow(force = false): void {
@@ -854,8 +984,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.renderRequested = false;
 		this.cancelRenderTimer();
 		this.lastRenderAt = performance.now();
-		this.beginRenderFrame();
-		this.doRender();
+		this.runRenderFrame();
 	}
 
 	requestRender(force = false): void {
@@ -882,8 +1011,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.cancelRenderTimer();
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
-			this.beginRenderFrame();
-			this.doRender();
+			this.runRenderFrame();
 		});
 	}
 
@@ -906,8 +1034,7 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
-			this.beginRenderFrame();
-			this.doRender();
+			this.runRenderFrame();
 			if (this.renderRequested) {
 				this.scheduleRender();
 			}

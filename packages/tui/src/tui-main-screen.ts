@@ -198,6 +198,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Render all components to get new lines
 		let newLines = this.render(width);
+		this.perfNoteLineCount(newLines.length);
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
@@ -235,6 +236,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				buffer += line;
 			}
 			buffer += "\x1b[?2026l"; // End synchronized output
+			this.perfNoteBytes(buffer);
 			this.terminal.write(buffer);
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
@@ -255,6 +257,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
 		const logRedraw = (reason: string): void => {
+			if (this.perfEnabled) {
+				this.perfWrite(
+					`FULL_REDRAW reason="${reason}" prevLines=${this.previousLines.length} newLines=${newLines.length} height=${height}`,
+				);
+			}
 			if (!debugRedraw) return;
 			const logPath = path.join(this.logDirectory, "pi-debug.log");
 			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
@@ -529,6 +536,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 
 		// Write entire buffer at once
+		this.perfNoteBytes(buffer);
 		this.terminal.write(buffer);
 
 		// Track cursor position for next render
