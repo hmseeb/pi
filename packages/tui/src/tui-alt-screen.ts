@@ -10,6 +10,7 @@ import { ScrollView } from "./components/scroll-view.ts";
 import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
+	getMouseTargetsAt,
 	getScrollbarGeometry,
 	getScrollViewBox,
 	getScrollViewsAt,
@@ -595,6 +596,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(mouseEvent)) return { consume: true };
 			const handled = this.handleScrollbarMouseEvent(mouseEvent);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(mouseEvent.x, mouseEvent.y);
+			if (!handled && this.handleComponentMouseEvent(mouseEvent)) return { consume: true };
 			if (!handled) this.handleSelectionMouseEvent(mouseEvent);
 			return { consume: true };
 		}
@@ -718,6 +720,31 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			y: Number.parseInt(match[3], 10) - 1,
 			release: match[4] === "m",
 		};
+	}
+
+	/**
+	 * Offer a left-button press to the component under the pointer.
+	 *
+	 * Only a plain press is offered. Motion events (bit 32) must fall through to
+	 * selection so that press-then-drag starting inside a component still
+	 * produces a text selection rather than only a caret jump; releases fall
+	 * through so an in-progress selection can still be completed and copied.
+	 */
+	private handleComponentMouseEvent(event: SgrMouseEvent): boolean {
+		if (event.release || (event.button & 32) !== 0) return false;
+		if ((event.button & 3) !== 0) return false;
+		if (this.selectionPressActive || this.hasOverlay() || !this.currentLayout) return false;
+		// Innermost first; a container may report a handler but decline the row.
+		for (const target of getMouseTargetsAt(this.currentLayout, event.x, event.y)) {
+			const consumed = target.component.handleMouse?.({
+				x: event.x - target.rect.x,
+				y: event.y - target.rect.y,
+				button: event.button & 3,
+				action: "press",
+			});
+			if (consumed) return true;
+		}
+		return false;
 	}
 
 	private handleRightClickPaste(event: SgrMouseEvent): boolean {

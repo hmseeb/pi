@@ -27,6 +27,21 @@ import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-imag
 import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
 
 /**
+ * A mouse event delivered to a component, in coordinates local to that
+ * component's layout box: `x`/`y` are relative to the box's `rect.x`/`rect.y`,
+ * so a component never needs to know where it sits on screen.
+ */
+export interface ComponentMouseEvent {
+	/** Column relative to the component's layout box. */
+	x: number;
+	/** Row relative to the component's layout box. */
+	y: number;
+	/** Raw SGR button code with modifier/motion bits masked off (0 = left). */
+	button: number;
+	action: "press" | "release" | "drag";
+}
+
+/**
  * Component interface - all components must implement this
  */
 export interface Component {
@@ -41,6 +56,13 @@ export interface Component {
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
+
+	/**
+	 * Optional handler for mouse events landing inside this component's layout
+	 * box. Coordinates are box-local. Return true to consume the event, which
+	 * suppresses the default viewport behaviour (text selection) for it.
+	 */
+	handleMouse?(event: ComponentMouseEvent): boolean;
 
 	/**
 	 * If true, component receives key release events (Kitty protocol).
@@ -77,6 +99,13 @@ export interface Focusable {
 /** Type guard to check if a component implements Focusable */
 export function isFocusable(component: Component | null): component is Component & Focusable {
 	return component !== null && "focused" in component;
+}
+
+/** Type guard to check if a component opts into mouse events */
+export function hasMouseHandler(
+	component: Component | null,
+): component is Component & Required<Pick<Component, "handleMouse">> {
+	return component !== null && typeof component.handleMouse === "function";
 }
 
 /**
@@ -288,6 +317,30 @@ export class Container implements Component {
 		this.renderCacheChildLines = childLines;
 		this.renderCacheLines = lines;
 		return lines;
+	}
+
+	/**
+	 * Forward a mouse event to the child that rendered the targeted row.
+	 *
+	 * A Container concatenates its children's lines into one block, so children
+	 * never receive their own layout box and are invisible to layout-level hit
+	 * testing. Row ranges are recovered from the per-child line arrays captured
+	 * during the last render, and `y` is rebased so each child still sees
+	 * coordinates local to itself.
+	 */
+	handleMouse(event: ComponentMouseEvent): boolean {
+		const childLines = this.renderCacheChildLines;
+		if (!childLines) return false;
+		let offset = 0;
+		for (let i = 0; i < childLines.length; i++) {
+			const height = childLines[i]!.length;
+			const child = this.children[i];
+			if (child && event.y >= offset && event.y < offset + height) {
+				return child.handleMouse?.({ ...event, y: event.y - offset }) ?? false;
+			}
+			offset += height;
+		}
+		return false;
 	}
 }
 

@@ -3,7 +3,7 @@ import { renderCursor } from "../cursor.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
-import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
+import { type Component, type ComponentMouseEvent, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
 	cjkBreakRegex,
@@ -301,6 +301,11 @@ export class Editor implements Component, Focusable {
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
 
+	// Geometry of the last render, used to map mouse coordinates back to text
+	// positions. Text rows start after the top border, hence the +1 in handleMouse.
+	private lastEffectivePaddingX: number = 0;
+	private lastVisibleLineCount: number = 0;
+
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
 
@@ -549,6 +554,10 @@ export class Editor implements Component, Focusable {
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
 
+		// Record geometry for mouse hit-testing (see handleMouse)
+		this.lastEffectivePaddingX = paddingX;
+		this.lastVisibleLineCount = visibleLines.length;
+
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
@@ -653,6 +662,98 @@ export class Editor implements Component, Focusable {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Move the caret to a clicked position.
+	 *
+	 * Coordinates are box-local. The rendered box is laid out as:
+	 *   row 0            top border
+	 *   rows 1..N        visible text (layout lines from scrollOffset)
+	 *   row N+1          bottom border
+	 *   rows N+2..       autocomplete dropdown, when open
+	 * Only the text rows are claimed; everything else is left to selection so
+	 * dragging across a border still selects.
+	 */
+	handleMouse(event: ComponentMouseEvent): boolean {
+		if (event.action !== "press" || event.button !== 0) return false;
+
+		const textRow = event.y - 1;
+		if (textRow < 0 || textRow >= this.lastVisibleLineCount) return false;
+
+		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		const visualIndex = this.scrollOffset + textRow;
+		const vl = visualLines[visualIndex];
+		if (!vl) return false;
+
+		const logicalLine = this.state.lines[vl.logicalLine] || "";
+		const segmentText = logicalLine.slice(vl.startCol, vl.startCol + vl.length);
+
+		// The last visual segment of a logical line may hold the caret one past its
+		// end; continuation segments may not, mirroring findVisualLineAt().
+		const isLastSegmentOfLine =
+			visualIndex === visualLines.length - 1 || visualLines[visualIndex + 1]?.logicalLine !== vl.logicalLine;
+
+		const targetDisplayCol = event.x - this.lastEffectivePaddingX;
+		const offset = this.displayColumnToOffset(segmentText, targetDisplayCol, isLastSegmentOfLine);
+
+		this.state.cursorLine = vl.logicalLine;
+		this.setCursorCol(Math.min(vl.startCol + offset, logicalLine.length));
+		this.snapCursorToSegmentStart(logicalLine);
+
+		if (this.autocompleteState) this.updateAutocomplete();
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		this.tui.requestRender();
+		return true;
+	}
+
+	/**
+	 * Map a display column within a visual line to a string offset in that line.
+	 *
+	 * Walks grapheme clusters accumulating display width so wide characters (CJK,
+	 * emoji) and zero-width sequences always resolve to a real cluster boundary.
+	 * A click landing on the right half of a wide grapheme snaps past it, which is
+	 * what makes clicking "just after" a character feel correct. Clicks beyond the
+	 * end clamp to the end of the segment.
+	 */
+	private displayColumnToOffset(segmentText: string, targetDisplayCol: number, allowEnd: boolean): number {
+		if (targetDisplayCol <= 0) return 0;
+
+		const graphemes = [...this.segment(segmentText, "grapheme")];
+		let displayCol = 0;
+		for (const grapheme of graphemes) {
+			const width = visibleWidth(grapheme.segment);
+			if (targetDisplayCol < displayCol + width) {
+				// Inside this cluster: pick the nearer of its two boundaries.
+				const landsOnSecondHalf = width > 1 && targetDisplayCol - displayCol >= Math.ceil(width / 2);
+				if (!landsOnSecondHalf) return grapheme.index;
+				const end = grapheme.index + grapheme.segment.length;
+				return allowEnd ? end : Math.min(end, Math.max(0, segmentText.length - 1));
+			}
+			displayCol += width;
+		}
+
+		// Past the end of the rendered text.
+		if (allowEnd) return segmentText.length;
+		const lastGrapheme = graphemes[graphemes.length - 1];
+		return lastGrapheme ? lastGrapheme.index : 0;
+	}
+
+	/**
+	 * Keep the caret off the interior of an atomic segment such as a paste marker,
+	 * snapping back to its start so the whole marker stays highlighted. Mirrors the
+	 * snapping performed by moveToVisualLine().
+	 */
+	private snapCursorToSegmentStart(logicalLine: string): void {
+		for (const seg of this.segment(logicalLine, "grapheme")) {
+			if (seg.index > this.state.cursorCol) return;
+			if (seg.segment.length <= 1) continue;
+			if (this.state.cursorCol < seg.index + seg.segment.length) {
+				this.state.cursorCol = seg.index;
+				return;
+			}
+		}
 	}
 
 	handleInput(data: string): void {

@@ -130,10 +130,12 @@ export {
 } from "./terminal-image.ts";
 export {
 	type Component,
+	type ComponentMouseEvent,
 	Container,
 	CURSOR_MARKER,
 	compositeTuiLine,
 	type Focusable,
+	hasMouseHandler,
 	isFocusable,
 	isViewportTUI,
 	type OverlayAnchor,

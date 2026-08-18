@@ -2,7 +2,7 @@ import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
-import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
+import { type Component, CURSOR_MARKER, compositeTuiLine, hasMouseHandler } from "./tui.ts";
 import { extractAnsiCode, getGraphemeCellRange, sliceByColumn, visibleWidth } from "./utils.ts";
 
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:;[^\x07\x1b]*)?(?:\x07|\x1b\\))+/;
@@ -381,8 +381,37 @@ export function renderLayoutFrame(
 	};
 }
 
-function containsPoint(rect: LayoutRect, x: number, y: number): boolean {
+export function containsPoint(rect: LayoutRect, x: number, y: number): boolean {
 	return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+}
+
+/**
+ * Collect visible boxes at (x, y) whose components handle mouse input, ordered
+ * innermost-first.
+ *
+ * Callers try each in turn and stop at the first that consumes the event. A
+ * container may report a handler yet decline the event (nothing interactive on
+ * that row), so a single "best" box is not enough. `clip` is tested for
+ * ancestors so a component scrolled out of view is never targeted; deeper and
+ * later-painted boxes sort first because they are drawn on top.
+ */
+export function getMouseTargetsAt(frame: LayoutFrame, x: number, y: number): LayoutBox[] {
+	const matches: Array<{ box: LayoutBox; depth: number; order: number }> = [];
+	let order = 0;
+	const visit = (box: LayoutBox, depth: number): void => {
+		if (!containsPoint(box.clip, x, y)) return;
+		if (hasMouseHandler(box.component) && containsPoint(box.rect, x, y)) {
+			matches.push({ box, depth, order: order++ });
+		}
+		for (const child of box.children) visit(child, depth + 1);
+	};
+	visit(frame.root, 0);
+	matches.sort((a, b) => {
+		if (a.box.layer !== b.box.layer) return b.box.layer - a.box.layer;
+		if (a.depth !== b.depth) return b.depth - a.depth;
+		return b.order - a.order;
+	});
+	return matches.map((entry) => entry.box);
 }
 
 export function getScrollViewBox(frame: LayoutFrame, scrollView: ScrollView): LayoutBox | undefined {
