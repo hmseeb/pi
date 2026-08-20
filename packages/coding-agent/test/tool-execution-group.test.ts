@@ -1,5 +1,5 @@
 import type { TUI } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { TOOL_LINK_PREFIX, ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import {
@@ -45,7 +45,17 @@ const builtinSource: SourceInfo = {
 };
 
 describe("ToolExecutionGroupComponent", () => {
-	beforeAll(() => initTheme("dark"));
+	const previousDisableToolLinks = process.env.PI_DISABLE_TOOL_LINKS;
+
+	beforeAll(() => {
+		initTheme("dark");
+		delete process.env.PI_DISABLE_TOOL_LINKS;
+	});
+
+	afterAll(() => {
+		if (previousDisableToolLinks === undefined) delete process.env.PI_DISABLE_TOOL_LINKS;
+		else process.env.PI_DISABLE_TOOL_LINKS = previousDisableToolLinks;
+	});
 
 	test("folds consecutive completed shell calls into a counted summary", () => {
 		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource), createFakeTui());
