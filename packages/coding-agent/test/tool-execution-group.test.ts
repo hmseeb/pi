@@ -93,9 +93,11 @@ describe("ToolExecutionGroupComponent", () => {
 
 		const expanded = group.render(120).join("\n");
 		expect(stripAnsi(expanded)).toContain("echo linked-1");
+		expect(expanded).toContain(`\x1b]8;;${groupUrl}`);
 		expect(expanded).toContain(`${TOOL_LINK_PREFIX}linked-shell-1`);
 		expect(stripAnsi(otherGroup.render(120).join("\n"))).not.toContain("echo other");
-		expect(group.activateLink(`${TOOL_LINK_PREFIX}linked-shell-1`)).toBe(true);
+		expect(group.activateLink(groupUrl)).toBe(true);
+		expect(stripAnsi(group.render(120).join("\n"))).not.toContain("echo linked-1");
 	});
 
 	test("omits group summary links outside viewport mode and in Orca", () => {
@@ -123,7 +125,7 @@ describe("ToolExecutionGroupComponent", () => {
 		}
 	});
 
-	test("keeps pending calls visible while folding completed calls", () => {
+	test("hides pending call details behind a compact running summary", () => {
 		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource), createFakeTui());
 		const complete = createShellTool("shell-complete", "echo done");
 		const pending = createShellTool("shell-pending", "sleep 10");
@@ -133,10 +135,16 @@ describe("ToolExecutionGroupComponent", () => {
 		group.completeTool("shell-complete", false);
 
 		const running = stripAnsi(group.render(120).join("\n"));
-		expect(running).toContain("Ran 1 shell command");
-		expect(running).toContain("sleep 10");
+		expect(running).toContain("Running 2 shell commands…");
+		expect(running).not.toContain("sleep 10");
 		expect(running).not.toContain("echo done");
 
+		group.setExpanded(true);
+		const expanded = stripAnsi(group.render(120).join("\n"));
+		expect(expanded).toContain("sleep 10");
+		expect(expanded).toContain("echo done");
+
+		group.setExpanded(false);
 		completeShellTool(pending);
 		group.completeTool("shell-pending", false);
 		const completed = stripAnsi(group.render(120).join("\n"));
@@ -167,6 +175,7 @@ describe("ToolExecutionGroupComponent", () => {
 		expect(category).toEqual({
 			key: "npm:pi-herdr-agents:/tmp/node_modules/pi-herdr-agents/pi-extension/index.ts",
 			verb: "Used",
+			runningVerb: "Using",
 			singular: "Herdr tool",
 			plural: "Herdr tools",
 		});

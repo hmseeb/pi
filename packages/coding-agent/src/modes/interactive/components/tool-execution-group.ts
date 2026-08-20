@@ -6,6 +6,7 @@ import { TOOL_LINK_PREFIX, type ToolExecutionComponent } from "./tool-execution.
 export interface ToolExecutionCategory {
 	key: string;
 	verb: string;
+	runningVerb: string;
 	singular: string;
 	plural: string;
 }
@@ -20,13 +21,19 @@ type GroupedTool = {
 };
 
 const BUILTIN_CATEGORIES: Record<string, ToolExecutionCategory> = {
-	bash: { key: "builtin:shell", verb: "Ran", singular: "shell command", plural: "shell commands" },
-	read: { key: "builtin:read", verb: "Read", singular: "file", plural: "files" },
-	edit: { key: "builtin:change", verb: "Changed", singular: "file", plural: "files" },
-	write: { key: "builtin:change", verb: "Changed", singular: "file", plural: "files" },
-	grep: { key: "builtin:search", verb: "Ran", singular: "search", plural: "searches" },
-	find: { key: "builtin:search", verb: "Ran", singular: "search", plural: "searches" },
-	ls: { key: "builtin:search", verb: "Ran", singular: "search", plural: "searches" },
+	bash: {
+		key: "builtin:shell",
+		verb: "Ran",
+		runningVerb: "Running",
+		singular: "shell command",
+		plural: "shell commands",
+	},
+	read: { key: "builtin:read", verb: "Read", runningVerb: "Reading", singular: "file", plural: "files" },
+	edit: { key: "builtin:change", verb: "Changed", runningVerb: "Changing", singular: "file", plural: "files" },
+	write: { key: "builtin:change", verb: "Changed", runningVerb: "Changing", singular: "file", plural: "files" },
+	grep: { key: "builtin:search", verb: "Ran", runningVerb: "Running", singular: "search", plural: "searches" },
+	find: { key: "builtin:search", verb: "Ran", runningVerb: "Running", singular: "search", plural: "searches" },
+	ls: { key: "builtin:search", verb: "Ran", runningVerb: "Running", singular: "search", plural: "searches" },
 };
 
 function titleCasePackageName(name: string): string {
@@ -65,6 +72,7 @@ export function getToolExecutionCategory(toolName: string, sourceInfo: SourceInf
 			BUILTIN_CATEGORIES[toolName] ?? {
 				key: "builtin:tool",
 				verb: "Used",
+				runningVerb: "Using",
 				singular: "built-in tool",
 				plural: "built-in tools",
 			}
@@ -76,6 +84,7 @@ export function getToolExecutionCategory(toolName: string, sourceInfo: SourceInf
 	return {
 		key,
 		verb: "Used",
+		runningVerb: "Using",
 		singular: `${label} tool`,
 		plural: `${label} tools`,
 	};
@@ -139,30 +148,28 @@ export class ToolExecutionGroupComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		if (this.expanded) {
-			return this.tools.flatMap((tool) => tool.component.render(width));
-		}
+		if (this.tools.length === 0) return [];
 
 		const complete = this.tools.filter((tool) => tool.complete);
-		const pending = this.tools.filter((tool) => !tool.complete);
-		const lines: string[] = [];
-		if (complete.length > 0) {
-			const failed = complete.filter((tool) => tool.isError).length;
-			const noun = complete.length === 1 ? this.category.singular : this.category.plural;
-			let summary = theme.fg("muted", `${this.category.verb} ${complete.length} ${noun}`);
-			if (failed > 0) {
-				summary += theme.fg("error", ` · ${failed} of ${complete.length} failed`);
-			}
-			const summaryWidth = Math.max(0, width - 1);
-			const summaryText = truncateToWidth(summary, summaryWidth);
-			const groupUrl = this.getGroupUrl();
-			const linkedSummary =
-				groupUrl && isViewportTUI(this.ui) && process.env.TERM_PROGRAM !== "Orca"
-					? hyperlink(summaryText, groupUrl)
-					: summaryText;
-			lines.push("", summaryWidth > 0 ? ` ${linkedSummary}` : "");
+		const pending = this.tools.length - complete.length;
+		const failed = complete.filter((tool) => tool.isError).length;
+		const noun = this.tools.length === 1 ? this.category.singular : this.category.plural;
+		const verb = pending > 0 ? this.category.runningVerb : this.category.verb;
+		let summary = theme.fg("muted", `${verb} ${this.tools.length} ${noun}${pending > 0 ? "…" : ""}`);
+		if (failed > 0) {
+			summary += theme.fg("error", ` · ${failed} of ${this.tools.length} failed`);
 		}
-		for (const tool of pending) lines.push(...tool.component.render(width));
+		const summaryWidth = Math.max(0, width - 1);
+		const summaryText = truncateToWidth(summary, summaryWidth);
+		const groupUrl = this.getGroupUrl();
+		const linkedSummary =
+			groupUrl && isViewportTUI(this.ui) && process.env.TERM_PROGRAM !== "Orca"
+				? hyperlink(summaryText, groupUrl)
+				: summaryText;
+		const lines = ["", summaryWidth > 0 ? ` ${linkedSummary}` : ""];
+		if (this.expanded) {
+			lines.push(...this.tools.flatMap((tool) => tool.component.render(width)));
+		}
 		return lines;
 	}
 
