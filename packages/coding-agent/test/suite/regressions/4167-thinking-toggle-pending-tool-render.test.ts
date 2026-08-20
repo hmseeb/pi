@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { SessionEntry } from "../../../src/core/session-manager.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import type { ToolExecutionGroupComponent } from "../../../src/modes/interactive/components/tool-execution-group.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
@@ -35,6 +36,7 @@ type RenderSessionItems = (
 
 type RenderSessionContextThis = {
 	pendingTools: Map<string, ToolExecutionComponent>;
+	pendingToolGroups: Map<string, ToolExecutionGroupComponent>;
 	chatContainer: Container;
 	footer: { invalidate(): void };
 	ui: TUI;
@@ -44,11 +46,17 @@ type RenderSessionContextThis = {
 		getShowCacheMissNotices(): boolean;
 	};
 	sessionManager: { getCwd(): string; getEntries(): SessionEntry[] };
-	session: { retryAttempt: number; modelRegistry: { find(provider: string, modelId: string): undefined } };
+	session: {
+		retryAttempt: number;
+		modelRegistry: { find(provider: string, modelId: string): undefined };
+		getAllTools(): [];
+	};
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
+	addToolExecutionToChat(toolName: string, toolCallId: string, component: ToolExecutionComponent): void;
+	completeToolExecution(toolCallId: string, isError: boolean): void;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	renderSessionItems: RenderSessionItems;
 };
@@ -65,6 +73,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
 	return {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
+		pendingToolGroups: new Map<string, ToolExecutionGroupComponent>(),
 		chatContainer,
 		footer: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
@@ -74,11 +83,21 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			getShowCacheMissNotices: () => false,
 		},
 		sessionManager: { getCwd: () => process.cwd(), getEntries: () => [] },
-		session: { retryAttempt: 0, modelRegistry: { find: () => undefined } },
-		toolOutputExpanded: false,
+		session: { retryAttempt: 0, modelRegistry: { find: () => undefined }, getAllTools: () => [] },
+		toolOutputExpanded: true,
 		isInitialized: true,
 		updateEditorBorderColor: vi.fn(),
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
+		addToolExecutionToChat: (
+			InteractiveMode.prototype as unknown as {
+				addToolExecutionToChat: RenderSessionContextThis["addToolExecutionToChat"];
+			}
+		).addToolExecutionToChat,
+		completeToolExecution: (
+			InteractiveMode.prototype as unknown as {
+				completeToolExecution: RenderSessionContextThis["completeToolExecution"];
+			}
+		).completeToolExecution,
 		renderSessionItems: (InteractiveMode.prototype as unknown as { renderSessionItems: RenderSessionItems })
 			.renderSessionItems,
 		addMessageToChat(message: AgentMessage) {

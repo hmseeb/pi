@@ -147,6 +147,7 @@ import {
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
 import { TOOL_LINK_PREFIX, ToolExecutionComponent } from "./components/tool-execution.ts";
+import { getToolExecutionCategory, ToolExecutionGroupComponent } from "./components/tool-execution-group.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -460,8 +461,9 @@ export class InteractiveMode {
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
 
-	// Tool execution tracking: toolCallId -> component
+	// Tool execution tracking: toolCallId -> component/group
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private pendingToolGroups = new Map<string, ToolExecutionGroupComponent>();
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2004,6 +2006,7 @@ export class InteractiveMode {
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
+		this.pendingToolGroups.clear();
 		this.renderInitialMessages();
 	}
 
@@ -2012,6 +2015,27 @@ export class InteractiveMode {
 	 */
 	private getRegisteredToolDefinition(toolName: string) {
 		return this.session.getToolDefinition(toolName);
+	}
+
+	private addToolExecutionToChat(toolName: string, toolCallId: string, component: ToolExecutionComponent): void {
+		const sourceInfo = this.session.getAllTools().find((tool) => tool.name === toolName)?.sourceInfo;
+		const category = getToolExecutionCategory(toolName, sourceInfo);
+		const lastChild = this.chatContainer.children[this.chatContainer.children.length - 1];
+		const group =
+			lastChild instanceof ToolExecutionGroupComponent && lastChild.matchesCategory(category)
+				? lastChild
+				: new ToolExecutionGroupComponent(category);
+		if (group !== lastChild) {
+			group.setExpanded(this.toolOutputExpanded);
+			this.chatContainer.addChild(group);
+		}
+		group.addTool(toolCallId, component);
+		this.pendingToolGroups.set(toolCallId, group);
+	}
+
+	private completeToolExecution(toolCallId: string, isError: boolean): void {
+		this.pendingToolGroups.get(toolCallId)?.completeTool(toolCallId, isError);
+		this.pendingToolGroups.delete(toolCallId);
 	}
 
 	private getMarkdownTransformers(): MarkdownTransformer[] {
@@ -3171,6 +3195,7 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				this.pendingToolGroups.clear();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3261,8 +3286,7 @@ export class InteractiveMode {
 									this.ui,
 									this.sessionManager.getCwd(),
 								);
-								component.setExpanded(this.toolOutputExpanded);
-								this.chatContainer.addChild(component);
+								this.addToolExecutionToChat(content.name, content.id, component);
 								this.pendingTools.set(content.id, component);
 							} else {
 								const component = this.pendingTools.get(content.id);
@@ -3295,11 +3319,12 @@ export class InteractiveMode {
 						if (!errorMessage) {
 							errorMessage = this.streamingMessage.errorMessage || "Error";
 						}
-						for (const [, component] of this.pendingTools.entries()) {
+						for (const [toolCallId, component] of this.pendingTools.entries()) {
 							component.updateResult({
 								content: [{ type: "text", text: errorMessage }],
 								isError: true,
 							});
+							this.completeToolExecution(toolCallId, true);
 						}
 						this.pendingTools.clear();
 					} else {
@@ -3335,8 +3360,7 @@ export class InteractiveMode {
 						this.ui,
 						this.sessionManager.getCwd(),
 					);
-					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
+					this.addToolExecutionToChat(event.toolName, event.toolCallId, component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
 				component.markExecutionStarted();
@@ -3357,6 +3381,7 @@ export class InteractiveMode {
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
+					this.completeToolExecution(event.toolCallId, event.isError);
 					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
@@ -3374,6 +3399,7 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+				this.pendingToolGroups.clear();
 
 				this.ui.requestRender();
 				break;
@@ -3675,6 +3701,7 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
+		this.pendingToolGroups.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache-miss notices are not persisted; re-derive them from the full entry
 		// list and re-inject them after the assistant messages that paid for them.
@@ -3712,8 +3739,7 @@ export class InteractiveMode {
 							this.ui,
 							this.sessionManager.getCwd(),
 						);
-						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						this.addToolExecutionToChat(content.name, content.id, component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
@@ -3727,6 +3753,7 @@ export class InteractiveMode {
 								errorMessage = message.errorMessage || "Error";
 							}
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+							this.completeToolExecution(content.id, true);
 						} else {
 							renderedPendingTools.set(content.id, component);
 						}
@@ -3741,6 +3768,7 @@ export class InteractiveMode {
 				const component = renderedPendingTools.get(message.toolCallId);
 				if (component) {
 					component.updateResult(message);
+					this.completeToolExecution(message.toolCallId, message.isError);
 					renderedPendingTools.delete(message.toolCallId);
 				}
 			} else {
@@ -4165,7 +4193,12 @@ export class InteractiveMode {
 
 	private openTranscriptLink(url: string): void {
 		for (const child of this.chatContainer.children) {
-			if (child instanceof ToolExecutionComponent && child.activateLink(url)) return;
+			if (
+				(child instanceof ToolExecutionComponent || child instanceof ToolExecutionGroupComponent) &&
+				child.activateLink(url)
+			) {
+				return;
+			}
 		}
 		if (!url.startsWith(TOOL_LINK_PREFIX)) openBrowser(url);
 	}
@@ -4562,7 +4595,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof ToolExecutionGroupComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -4570,7 +4603,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof ToolExecutionGroupComponent) {
 								child.setImageWidthCells(width);
 							}
 						}
