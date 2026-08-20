@@ -988,6 +988,23 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Write a session that has content but no assistant message yet (see the
+	 * `hasAssistant` guard in `_persist`) to disk. Called on interactive exit so a
+	 * session the user actually typed in stays resumable even when the turn never
+	 * produced a reply. Returns true when the session is on disk afterwards.
+	 */
+	flushToDisk(): boolean {
+		if (!this.persist || !this.sessionFile) return false;
+		if (this.flushed) return true;
+		// Startup bookkeeping (model/thinking changes, extension messages) alone is not
+		// worth a file; only a real conversation entry is.
+		if (!this.fileEntries.some((e) => e.type === "message")) return false;
+		this._rewriteFile();
+		this.flushed = true;
+		return true;
+	}
+
 	isPersisted(): boolean {
 		return this.persist;
 	}

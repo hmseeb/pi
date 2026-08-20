@@ -7,18 +7,15 @@
  * changes, so the cursor picks up the theme's accent/cursor color instead of
  * being a plain reverse-video white block.
  *
- * Focus semantics:
- * - focused   -> filled block (theme colored), blinking like a native terminal
- *               cursor. Blink is the SGR 5 attribute, so the terminal owns the
- *               timing and no repaint timer is needed. Terminals that ignore
- *               SGR 5 simply show a steady block.
- * - unfocused -> hollow block. A text cell cannot draw left/right borders, so
- *                when the host TUI can park the real terminal cursor on the
- *                caret (main screen, via CURSOR_MARKER) the fake cursor is
- *                suppressed and the terminal draws its own native hollow box -
- *                all four edges. Where that is unavailable (alt screen, hosts
- *                that do not position the hardware cursor) it falls back to an
- *                overline + underline outline.
+ * Focus semantics when the host TUI can park the real cursor on the caret:
+ * - focused   -> terminal-native blinking filled block
+ * - unfocused -> terminal-native full-cell hollow block
+ *
+ * The software cursor is suppressed in both states. The terminal owns the
+ * animation and the unfocused outline, so all four edges match the exact cell
+ * size at no repaint cost. Where hardware positioning is unavailable, the
+ * software fallback is a static reverse-video block when focused and an
+ * overline + underline when not.
  */
 export type CursorRenderer = (grapheme: string, focused: boolean) => string;
 
@@ -26,15 +23,9 @@ export type CursorRenderer = (grapheme: string, focused: boolean) => string;
 export const CURSOR_OUTLINE_ON = "\x1b[53m\x1b[4m";
 export const CURSOR_OUTLINE_OFF = "\x1b[24m\x1b[55m";
 
-/** SGR 5/25 = blink on/off. Only the focused (filled) cursor blinks. */
-export const CURSOR_BLINK_ON = "\x1b[5m";
-export const CURSOR_BLINK_OFF = "\x1b[25m";
-
-/** Blinking reverse video (filled) when focused, static outline when not. */
+/** Reverse video (filled) when focused, outlined (unfilled) when not. */
 const defaultCursorRenderer: CursorRenderer = (grapheme, focused) =>
-	focused
-		? `${CURSOR_BLINK_ON}\x1b[7m${grapheme}\x1b[27m${CURSOR_BLINK_OFF}`
-		: `${CURSOR_OUTLINE_ON}${grapheme}${CURSOR_OUTLINE_OFF}`;
+	focused ? `\x1b[7m${grapheme}\x1b[27m` : `${CURSOR_OUTLINE_ON}${grapheme}${CURSOR_OUTLINE_OFF}`;
 
 // Shared across module loaders (tsx + jiti in dev mode), same trick as the theme.
 const CURSOR_RENDERER_KEY = Symbol.for("@earendil-works/pi-tui:cursor-renderer");
@@ -67,24 +58,26 @@ export function isTerminalFocused(): boolean {
 /**
  * Render the grapheme under the caret with the active cursor style.
  *
- * The cursor is only filled when the component has app focus AND the terminal
- * window/pane itself is focused - an unfocused split should hollow out just
- * like a native terminal cursor does.
+ * When the host TUI parks the real terminal cursor on the caret, the focused
+ * cursor is left entirely to the terminal: it blinks natively and hollows out
+ * by itself when the window loses focus. Otherwise a software cursor is drawn,
+ * filled only when the component has app focus AND the terminal window/pane
+ * itself is focused.
  */
 export function renderCursor(grapheme: string, focused: boolean): string {
 	const state = getCursorFrameState();
 	state.current = true;
-	if (focused && !isTerminalFocused() && isHardwareHollowCursorEnabled()) {
-		// The real terminal cursor is parked here and draws the hollow box itself.
+	if (focused && isHardwareHollowCursorEnabled()) {
+		// The real cursor is parked here: the terminal blinks it while focused and
+		// turns the same full-cell block hollow when the window loses focus.
 		return grapheme;
 	}
 	return getCursorRenderer()(grapheme, focused && isTerminalFocused());
 }
 
 /**
- * Set by the TUI when it positions the hardware cursor on the caret, so an
- * unfocused terminal can show its own native hollow cursor instead of a
- * software outline.
+ * Set by the TUI when it positions the hardware cursor on the caret, so the
+ * terminal can blink its own cursor there instead of a static software block.
  */
 export function setHardwareHollowCursor(enabled: boolean): void {
 	(globalThis as Record<symbol, boolean | undefined>)[HARDWARE_HOLLOW_KEY] = enabled;

@@ -10,7 +10,6 @@ import {
 	beginCursorFrame,
 	hasRenderedCursor,
 	isHardwareHollowCursorEnabled,
-	isTerminalFocused,
 	setHardwareHollowCursor,
 	setTerminalFocused,
 } from "./cursor.ts";
@@ -463,6 +462,8 @@ export abstract class TuiBase extends Container implements TUI {
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
 	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
+	/** Whether pi has requested DECSCUSR blinking-block for the parked cursor. */
+	private hardwareBlockCursorActive = false;
 	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1";
 	protected fullRedrawCount = 0;
 	protected stopped = false;
@@ -660,10 +661,23 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	getShowHardwareCursor(): boolean {
-		// While the terminal is unfocused the fake cursor stands down and the real
-		// cursor takes over, so the terminal can draw its native hollow box.
-		if (!isTerminalFocused() && isHardwareHollowCursorEnabled()) return true;
+		// A focused component drew a caret and this TUI parks the real cursor on it.
+		// Keep it visible in both window-focus states: Ghostty blinks the block while
+		// focused and changes that exact cell-sized block to block_hollow when not.
+		if (isHardwareHollowCursorEnabled() && hasRenderedCursor()) return true;
 		return this.showHardwareCursor;
+	}
+
+	/**
+	 * Request a native blinking block once per TUI lifetime. Shells can leave a
+	 * pane's cursor as a bar or underline; pi needs a block so Ghostty can turn
+	 * that exact full cell into block_hollow on focus loss. The style deliberately
+	 * stays active across focus changes and is restored in stop().
+	 */
+	protected activateHardwareBlockCursor(): string {
+		if (this.hardwareBlockCursorActive) return "";
+		this.hardwareBlockCursorActive = true;
+		return "\x1b[1 q"; // DECSCUSR 1: blinking block
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {
@@ -1034,6 +1048,10 @@ export abstract class TuiBase extends Container implements TUI {
 		this.stopped = true;
 		this.cancelRenderTimer();
 		this.terminal.write(DISABLE_FOCUS_REPORTING);
+		if (this.hardwareBlockCursorActive) {
+			this.hardwareBlockCursorActive = false;
+			this.terminal.write("\x1b[0 q"); // DECSCUSR 0: terminal default
+		}
 		setTerminalFocused(true);
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");

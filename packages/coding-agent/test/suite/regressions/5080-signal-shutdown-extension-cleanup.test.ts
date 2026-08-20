@@ -38,6 +38,7 @@ class ProcessExitError extends Error {}
 
 function createSessionManager(options: { sessionFile?: string } = {}): SessionManager {
 	return {
+		flushToDisk: () => options.sessionFile !== undefined,
 		isPersisted: () => options.sessionFile !== undefined,
 		getSessionFile: () => options.sessionFile,
 		getSessionId: () => "test-session",

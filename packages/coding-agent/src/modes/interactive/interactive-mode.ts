@@ -3052,6 +3052,11 @@ export class InteractiveMode {
 				await this.handleClearCommand();
 				return;
 			}
+			if (text === "/clear" || text === "/c") {
+				this.editor.setText("");
+				await this.handleClearContextCommand();
+				return;
+			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");
@@ -3913,6 +3918,9 @@ export class InteractiveMode {
 		this.stop();
 		await this.runtimeHost.dispose();
 
+		// A session whose turn never produced an assistant message is still only in
+		// memory; write it out so the resume hint below is not silently skipped.
+		this.sessionManager.flushToDisk();
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
@@ -5813,14 +5821,14 @@ export class InteractiveMode {
 	// Command handlers
 	// =========================================================================
 
-	private async handleReloadCommand(): Promise<void> {
+	private async handleReloadCommand(): Promise<boolean> {
 		if (this.session.isStreaming) {
 			this.showWarning("Wait for the current response to finish before reloading.");
-			return;
+			return false;
 		}
 		if (this.session.isCompacting) {
 			this.showWarning("Wait for compaction to finish before reloading.");
-			return;
+			return false;
 		}
 
 		this.resetExtensionUI();
@@ -5895,11 +5903,13 @@ export class InteractiveMode {
 			);
 			dismissReloadBox(this.editor as Component);
 			reloadBoxDismissed = true;
+			return true;
 		} catch (error) {
 			if (!reloadBoxDismissed) {
 				dismissReloadBox(previousEditor as Component);
 			}
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		}
 	}
 
@@ -6360,6 +6370,18 @@ export class InteractiveMode {
 		} catch (error: unknown) {
 			await this.handleFatalRuntimeError("Failed to create session", error);
 		}
+	}
+
+	/**
+	 * `/clear` (and `/c`): reload the runtime, then wipe the conversation context
+	 * by starting a fresh session. Aborts the wipe if the reload failed.
+	 */
+	private async handleClearContextCommand(): Promise<void> {
+		const reloaded = await this.handleReloadCommand();
+		if (!reloaded) {
+			return;
+		}
+		await this.handleClearCommand();
 	}
 
 	private handleDebugCommand(): void {

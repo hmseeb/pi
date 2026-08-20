@@ -583,12 +583,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Move to absolute column (1-indexed)
 		buffer += `\x1b[${targetCol + 1}G`;
 
+		const visible = this.getShowHardwareCursor();
+		if (visible) buffer += this.activateHardwareBlockCursor();
+
 		if (buffer) {
 			this.terminal.write(buffer);
 		}
 
 		this.hardwareCursorRow = targetRow;
-		if (this.getShowHardwareCursor()) {
+		if (visible) {
 			this.terminal.showCursor();
 		} else {
 			this.terminal.hideCursor();

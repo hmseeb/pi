@@ -350,7 +350,8 @@ export class ToolExecutionComponent extends Container {
 			lines = super.render(width);
 		}
 
-		if (!isViewportTUI(this.ui) || process.env.TERM_PROGRAM === "Orca") return lines;
+		if (!isViewportTUI(this.ui) || process.env.PI_DISABLE_TOOL_LINKS === "1" || process.env.TERM_PROGRAM === "Orca")
+			return lines;
 		const url = `${TOOL_LINK_PREFIX}${encodeURIComponent(this.toolCallId)}`;
 		return this.linkCache.map(width, lines, (source) => {
 			// Generational swap rather than a fixed cap: the previous pass is the
