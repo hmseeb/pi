@@ -1,9 +1,10 @@
 import type { TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test } from "vitest";
 import type { SourceInfo } from "../src/core/source-info.ts";
-import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { TOOL_LINK_PREFIX, ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import {
 	getToolExecutionCategory,
+	TOOL_GROUP_LINK_PREFIX,
 	ToolExecutionGroupComponent,
 } from "../src/modes/interactive/components/tool-execution-group.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -13,8 +14,15 @@ function createFakeTui(): TUI {
 	return { requestRender: () => {} } as unknown as TUI;
 }
 
-function createShellTool(id: string, command: string): ToolExecutionComponent {
-	const component = new ToolExecutionComponent("bash", id, { command }, {}, undefined, createFakeTui(), process.cwd());
+function createFakeViewportTui(): TUI {
+	return {
+		[Symbol.for("@earendil-works/pi-tui/viewport")]: true,
+		requestRender: () => {},
+	} as unknown as TUI;
+}
+
+function createShellTool(id: string, command: string, tui: TUI = createFakeTui()): ToolExecutionComponent {
+	const component = new ToolExecutionComponent("bash", id, { command }, {}, undefined, tui, process.cwd());
 	component.markExecutionStarted();
 	return component;
 }
@@ -40,7 +48,7 @@ describe("ToolExecutionGroupComponent", () => {
 	beforeAll(() => initTheme("dark"));
 
 	test("folds consecutive completed shell calls into a counted summary", () => {
-		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource));
+		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource), createFakeTui());
 		for (let index = 1; index <= 3; index++) {
 			const id = `shell-${index}`;
 			const component = createShellTool(id, `echo ${index}`);
@@ -61,8 +69,62 @@ describe("ToolExecutionGroupComponent", () => {
 		expect(expanded).toContain("command output");
 	});
 
+	test("links the collapsed summary and preserves child links after expanding only that group", () => {
+		const tui = createFakeViewportTui();
+		const category = getToolExecutionCategory("bash", builtinSource);
+		const group = new ToolExecutionGroupComponent(category, tui);
+		for (let index = 1; index <= 2; index++) {
+			const id = `linked-shell-${index}`;
+			const component = createShellTool(id, `echo linked-${index}`, tui);
+			group.addTool(id, component);
+			completeShellTool(component);
+			group.completeTool(id, false);
+		}
+		const otherGroup = new ToolExecutionGroupComponent(category, tui);
+		const otherComponent = createShellTool("other-shell", "echo other", tui);
+		otherGroup.addTool("other-shell", otherComponent);
+		completeShellTool(otherComponent);
+		otherGroup.completeTool("other-shell", false);
+
+		const groupUrl = `${TOOL_GROUP_LINK_PREFIX}${encodeURIComponent("linked-shell-1")}`;
+		const collapsed = group.render(120).join("\n");
+		expect(collapsed).toContain(`\x1b]8;;${groupUrl}`);
+		expect(group.activateLink(groupUrl)).toBe(true);
+
+		const expanded = group.render(120).join("\n");
+		expect(stripAnsi(expanded)).toContain("echo linked-1");
+		expect(expanded).toContain(`${TOOL_LINK_PREFIX}linked-shell-1`);
+		expect(stripAnsi(otherGroup.render(120).join("\n"))).not.toContain("echo other");
+		expect(group.activateLink(`${TOOL_LINK_PREFIX}linked-shell-1`)).toBe(true);
+	});
+
+	test("omits group summary links outside viewport mode and in Orca", () => {
+		const category = getToolExecutionCategory("bash", builtinSource);
+		const plainGroup = new ToolExecutionGroupComponent(category, createFakeTui());
+		const plainTool = createShellTool("plain-shell", "echo plain");
+		plainGroup.addTool("plain-shell", plainTool);
+		completeShellTool(plainTool);
+		plainGroup.completeTool("plain-shell", false);
+		expect(plainGroup.render(120).join("\n")).not.toContain("\x1b]8;;");
+
+		const previousTermProgram = process.env.TERM_PROGRAM;
+		process.env.TERM_PROGRAM = "Orca";
+		try {
+			const orcaTui = createFakeViewportTui();
+			const orcaGroup = new ToolExecutionGroupComponent(category, orcaTui);
+			const orcaTool = createShellTool("orca-shell", "echo orca", orcaTui);
+			orcaGroup.addTool("orca-shell", orcaTool);
+			completeShellTool(orcaTool);
+			orcaGroup.completeTool("orca-shell", false);
+			expect(orcaGroup.render(120).join("\n")).not.toContain("\x1b]8;;");
+		} finally {
+			if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = previousTermProgram;
+		}
+	});
+
 	test("keeps pending calls visible while folding completed calls", () => {
-		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource));
+		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource), createFakeTui());
 		const complete = createShellTool("shell-complete", "echo done");
 		const pending = createShellTool("shell-pending", "sleep 10");
 		group.addTool("shell-complete", complete);
@@ -83,7 +145,7 @@ describe("ToolExecutionGroupComponent", () => {
 	});
 
 	test("always includes the failure count in collapsed summaries", () => {
-		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource));
+		const group = new ToolExecutionGroupComponent(getToolExecutionCategory("bash", builtinSource), createFakeTui());
 		for (let index = 1; index <= 3; index++) {
 			const id = `shell-${index}`;
 			const component = createShellTool(id, `command ${index}`);
@@ -109,7 +171,7 @@ describe("ToolExecutionGroupComponent", () => {
 			plural: "Herdr tools",
 		});
 
-		const group = new ToolExecutionGroupComponent(category);
+		const group = new ToolExecutionGroupComponent(category, createFakeTui());
 		for (let index = 1; index <= 2; index++) {
 			const id = `herdr-${index}`;
 			const component = new ToolExecutionComponent(

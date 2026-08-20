@@ -1,7 +1,7 @@
-import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, hyperlink, isViewportTUI, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { SourceInfo } from "../../../core/source-info.ts";
 import { theme } from "../theme/theme.ts";
-import type { ToolExecutionComponent } from "./tool-execution.ts";
+import { TOOL_LINK_PREFIX, type ToolExecutionComponent } from "./tool-execution.ts";
 
 export interface ToolExecutionCategory {
 	key: string;
@@ -9,6 +9,8 @@ export interface ToolExecutionCategory {
 	singular: string;
 	plural: string;
 }
+
+export const TOOL_GROUP_LINK_PREFIX = `${TOOL_LINK_PREFIX}group:`;
 
 type GroupedTool = {
 	toolCallId: string;
@@ -82,10 +84,12 @@ export function getToolExecutionCategory(toolName: string, sourceInfo: SourceInf
 export class ToolExecutionGroupComponent implements Component {
 	private readonly category: ToolExecutionCategory;
 	private readonly tools: GroupedTool[] = [];
+	private readonly ui: TUI;
 	private expanded = false;
 
-	constructor(category: ToolExecutionCategory) {
+	constructor(category: ToolExecutionCategory, ui: TUI) {
 		this.category = category;
+		this.ui = ui;
 	}
 
 	matchesCategory(category: ToolExecutionCategory): boolean {
@@ -118,10 +122,20 @@ export class ToolExecutionGroupComponent implements Component {
 	}
 
 	activateLink(url: string): boolean {
+		const groupUrl = this.getGroupUrl();
+		if (groupUrl && url === groupUrl) {
+			this.setExpanded(!this.expanded);
+			return true;
+		}
 		for (const tool of this.tools) {
 			if (tool.component.activateLink(url)) return true;
 		}
 		return false;
+	}
+
+	private getGroupUrl(): string | undefined {
+		const firstTool = this.tools[0];
+		return firstTool ? `${TOOL_GROUP_LINK_PREFIX}${encodeURIComponent(firstTool.toolCallId)}` : undefined;
 	}
 
 	render(width: number): string[] {
@@ -139,7 +153,14 @@ export class ToolExecutionGroupComponent implements Component {
 			if (failed > 0) {
 				summary += theme.fg("error", ` · ${failed} of ${complete.length} failed`);
 			}
-			lines.push("", truncateToWidth(` ${summary}`, width));
+			const summaryWidth = Math.max(0, width - 1);
+			const summaryText = truncateToWidth(summary, summaryWidth);
+			const groupUrl = this.getGroupUrl();
+			const linkedSummary =
+				groupUrl && isViewportTUI(this.ui) && process.env.TERM_PROGRAM !== "Orca"
+					? hyperlink(summaryText, groupUrl)
+					: summaryText;
+			lines.push("", summaryWidth > 0 ? ` ${linkedSummary}` : "");
 		}
 		for (const tool of pending) lines.push(...tool.component.render(width));
 		return lines;

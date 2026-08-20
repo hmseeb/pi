@@ -2024,7 +2024,7 @@ export class InteractiveMode {
 		const group =
 			lastChild instanceof ToolExecutionGroupComponent && lastChild.matchesCategory(category)
 				? lastChild
-				: new ToolExecutionGroupComponent(category);
+				: new ToolExecutionGroupComponent(category, this.ui);
 		if (group !== lastChild) {
 			group.setExpanded(this.toolOutputExpanded);
 			this.chatContainer.addChild(group);
