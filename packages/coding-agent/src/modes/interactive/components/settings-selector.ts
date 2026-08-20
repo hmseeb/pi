@@ -58,6 +58,7 @@ const DEFAULT_PROJECT_TRUST_BY_LABEL = new Map(
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	groupToolCalls: boolean;
 	showImages: boolean;
 	imageWidthCells: number;
 	autoResizeImages: boolean;
@@ -95,6 +96,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onGroupToolCallsChange: (enabled: boolean) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onImageWidthCellsChange: (width: number) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
@@ -663,17 +665,25 @@ export class SettingsSelectorComponent extends Container {
 			},
 		];
 
+		items.splice(1, 0, {
+			id: "group-tool-calls",
+			label: "Group tool calls",
+			description: "Fold tool calls into compact, expandable summaries",
+			currentValue: config.groupToolCalls ? "true" : "false",
+			values: ["true", "false"],
+		});
+
 		// Only show image toggle if terminal supports it
 		if (supportsImages) {
-			// Insert after autocompact
-			items.splice(1, 0, {
+			// Insert after tool-call grouping
+			items.splice(2, 0, {
 				id: "show-images",
 				label: "Show images",
 				description: "Render images inline in terminal",
 				currentValue: config.showImages ? "true" : "false",
 				values: ["true", "false"],
 			});
-			items.splice(2, 0, {
+			items.splice(3, 0, {
 				id: "image-width-cells",
 				label: "Image width",
 				description: "Preferred inline image width in terminal cells",
@@ -683,7 +693,7 @@ export class SettingsSelectorComponent extends Container {
 		}
 
 		// Image auto-resize toggle (always available, affects both attached and read images)
-		items.splice(supportsImages ? 3 : 1, 0, {
+		items.splice(supportsImages ? 4 : 2, 0, {
 			id: "auto-resize-images",
 			label: "Auto-resize images",
 			description: "Resize large images to 2000x2000 max for better model compatibility",
@@ -782,6 +792,9 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "group-tool-calls":
+						callbacks.onGroupToolCallsChange(newValue === "true");
 						break;
 					case "show-images":
 						callbacks.onShowImagesChange(newValue === "true");

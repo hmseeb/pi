@@ -449,6 +449,18 @@ describe("SettingsManager", () => {
 		expect(reloadedManager.getFullscreenScrollbar()).toBe("auto");
 	});
 
+	it("defaults tool-call grouping on and persists disabling it", async () => {
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getGroupToolCalls()).toBe(true);
+
+		manager.setGroupToolCalls(false);
+		await manager.flush();
+
+		expect(manager.getGroupToolCalls()).toBe(false);
+		const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+		expect(savedSettings.groupToolCalls).toBe(false);
+	});
+
 	describe("outputPad", () => {
 		it("should default to 1 and persist binary values", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

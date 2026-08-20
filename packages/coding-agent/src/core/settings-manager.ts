@@ -101,6 +101,7 @@ export interface Settings {
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	showCacheMissNotices?: boolean; // default: false - show transcript notices for significant prompt-cache misses
+	groupToolCalls?: boolean; // default: true - fold consecutive tool calls into compact summaries
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
 	quietStartup?: boolean;
@@ -1066,6 +1067,16 @@ export class SettingsManager {
 
 	getThinkingBudgets(): ThinkingBudgetsSettings | undefined {
 		return this.settings.thinkingBudgets;
+	}
+
+	getGroupToolCalls(): boolean {
+		return this.settings.groupToolCalls ?? true;
+	}
+
+	setGroupToolCalls(enabled: boolean): void {
+		this.globalSettings.groupToolCalls = enabled;
+		this.markModified("groupToolCalls");
+		this.save();
 	}
 
 	getShowImages(): boolean {

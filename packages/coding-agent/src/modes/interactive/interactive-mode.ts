@@ -2018,6 +2018,12 @@ export class InteractiveMode {
 	}
 
 	private addToolExecutionToChat(toolName: string, toolCallId: string, component: ToolExecutionComponent): void {
+		if (!this.settingsManager.getGroupToolCalls()) {
+			component.setExpanded(this.toolOutputExpanded);
+			this.chatContainer.addChild(component);
+			return;
+		}
+
 		const sourceInfo = this.session.getAllTools().find((tool) => tool.name === toolName)?.sourceInfo;
 		const category = getToolExecutionCategory(toolName, sourceInfo);
 		const lastChild = this.chatContainer.children[this.chatContainer.children.length - 1];
@@ -4553,6 +4559,7 @@ export class InteractiveMode {
 			selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
+					groupToolCalls: this.settingsManager.getGroupToolCalls(),
 					showImages: this.settingsManager.getShowImages(),
 					imageWidthCells: this.settingsManager.getImageWidthCells(),
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
@@ -4591,6 +4598,10 @@ export class InteractiveMode {
 					onAutoCompactChange: (enabled) => {
 						this.session.setAutoCompactionEnabled(enabled);
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onGroupToolCallsChange: (enabled) => {
+						this.settingsManager.setGroupToolCalls(enabled);
+						this.renderInitialMessages();
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);

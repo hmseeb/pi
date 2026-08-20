@@ -41,6 +41,7 @@ type RenderSessionContextThis = {
 	footer: { invalidate(): void };
 	ui: TUI;
 	settingsManager: {
+		getGroupToolCalls(): boolean;
 		getShowImages(): boolean;
 		getImageWidthCells(): number;
 		getShowCacheMissNotices(): boolean;
@@ -78,6 +79,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		footer: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() } as unknown as TUI,
 		settingsManager: {
+			getGroupToolCalls: () => true,
 			getShowImages: () => false,
 			getImageWidthCells: () => 60,
 			getShowCacheMissNotices: () => false,
