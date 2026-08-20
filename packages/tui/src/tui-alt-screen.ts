@@ -45,7 +45,6 @@ import {
 	extractAnsiCode,
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
-	getOsc8SpanAtColumn,
 	getWordSegmenter,
 	sliceByColumn,
 	stripOsc8,
@@ -214,7 +213,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
 	/** Link span under the pointer, underlined so hovering shows it is clickable. */
-	private hoveredLink?: { row: number; startCol: number; endCol: number };
 	private selectionDragged = false;
 	private readonly wheelScrollLines: number;
 	private readonly mouseEnabled: boolean;
@@ -600,7 +598,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(mouseEvent)) return { consume: true };
 			const handled = this.handleScrollbarMouseEvent(mouseEvent);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(mouseEvent.x, mouseEvent.y);
-			this.updateLinkHover(mouseEvent);
 			if (!handled && this.handleComponentMouseEvent(mouseEvent)) return { consume: true };
 			if (!handled) this.handleSelectionMouseEvent(mouseEvent);
 			return { consume: true };
@@ -1236,68 +1233,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return result;
 	}
 
-	/**
-	 * Track the hyperlink under the pointer. OSC 8 markers are stripped from the
-	 * bytes written to the terminal, so the terminal draws no link underline of
-	 * its own; this supplies the hover affordance instead.
-	 */
-	private updateLinkHover(event: SgrMouseEvent): void {
-		let next: { row: number; startCol: number; endCol: number } | undefined;
-		if (!this.selectionPressActive && !this.scrollbarDrag) {
-			const row = Math.max(0, Math.min(this.terminal.rows - 1, event.y));
-			const col = Math.max(0, Math.min(this.terminal.columns - 1, event.x));
-			const span = getOsc8SpanAtColumn(this.previousScreen[row] ?? "", col);
-			if (span) next = { row, startCol: span.startCol, endCol: span.endCol };
-		}
-		const current = this.hoveredLink;
-		const same =
-			current === next ||
-			(current !== undefined &&
-				next !== undefined &&
-				current.row === next.row &&
-				current.startCol === next.startCol &&
-				current.endCol === next.endCol);
-		if (same) return;
-		this.hoveredLink = next;
-		this.requestRender();
-	}
-
-	/** Underline the hovered link span in the composed screen. */
-	private applyLinkHover(screen: string[]): string[] {
-		const hover = this.hoveredLink;
-		if (!hover) return screen;
-		const line = screen[hover.row];
-		if (line === undefined || isImageLine(line)) return screen;
-		const lineWidth = visibleWidth(line);
-		const startCol = Math.min(hover.startCol, lineWidth);
-		const endCol = Math.min(hover.endCol, lineWidth);
-		if (endCol <= startCol) return screen;
-		const before = sliceByColumn(line, 0, startCol, true);
-		const target = sliceByColumn(line, startCol, endCol - startCol, true);
-		const after = sliceByColumn(line, endCol, Math.max(0, lineWidth - endCol), true);
-		const result = [...screen];
-		result[hover.row] = `${before}${this.applyHoverUnderline(target)}${after}`;
-		return result;
-	}
-
-	/** Underline text, re-applying after inner SGR resets so it is not dropped. */
-	private applyHoverUnderline(text: string): string {
-		let result = "\x1b[4m";
-		let index = 0;
-		while (index < text.length) {
-			const ansi = extractAnsiCode(text, index);
-			if (!ansi) {
-				result += text[index];
-				index += 1;
-				continue;
-			}
-			result += ansi.code;
-			if (ansi.code.endsWith("m")) result += "\x1b[4m";
-			index += ansi.length;
-		}
-		return `${result}\x1b[24m`;
-	}
-
 	private applySelectionHighlight(text: string): string {
 		let result = "\x1b[7m";
 		let index = 0;
@@ -1486,7 +1421,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.applySelection(screen, nextLayout);
 		screen = this.compositeScrollAffordances(screen, width, height, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
-		screen = this.applyLinkHover(screen);
 
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => {
