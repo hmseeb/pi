@@ -6,6 +6,8 @@
 
 - Editor/Input cursors now use the terminal's native hardware cursor wherever the TUI can park it on the caret: a blinking filled block while focused and the same exact cell-sized block rendered hollow on focus loss, at no repaint cost. The software cursor remains the fallback for hosts that cannot position the hardware cursor.
 
+## [0.84.3] - 2026-08-24
+
 ### Fixed
 
 - Fixed duplicate fullscreen right-click paste in VS Code-based terminals on Windows ([#8186](https://github.com/earendil-works/pi/issues/8186)).
