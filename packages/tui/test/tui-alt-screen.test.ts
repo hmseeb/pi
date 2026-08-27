@@ -178,6 +178,86 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("batches consecutive wheel reports before updating the viewport", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.viewportTop, 6);
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		terminal.sendInput("\x1b[<64;1;1M");
+		terminal.sendInput("\x1b[<64;1;1M");
+		assert.strictEqual(tui.viewportTop, 6);
+
+		await terminal.waitForRender();
+		assert.strictEqual(tui.viewportTop, 3);
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 4", "line 5", "line 6", "line 7"],
+		);
+		tui.stop();
+	});
+
+	it("drains large wheel bursts across multiple frames in xterm.js hosts", async () => {
+		const termProgram = process.env.TERM_PROGRAM;
+		process.env.TERM_PROGRAM = "Orca";
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		try {
+			tui.addChild(new Text(Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			assert.strictEqual(tui.viewportTop, 36);
+
+			for (let index = 0; index < 12; index++) terminal.sendInput("\x1b[<64;1;1M");
+			await new Promise((resolve) => setTimeout(resolve, 8));
+			assert.strictEqual(tui.viewportTop, 33);
+
+			await new Promise((resolve) => setTimeout(resolve, 70));
+			await terminal.flush();
+			assert.strictEqual(tui.viewportTop, 24);
+		} finally {
+			tui.stop();
+			if (termProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = termProgram;
+		}
+	});
+
+	it("uses a hardware scroll region while keeping the dock fixed", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true },
+		);
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: new Text("editor\nfooter", 0, 0), basis: 2, shrink: 0 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+		const eventCount = terminal.events.length;
+
+		terminal.sendInput("\x1b[<64;1;1M");
+		await terminal.waitForRender();
+		const scrollWrites = terminal.events
+			.slice(eventCount)
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.ok(scrollWrites.includes("\x1b[1;4r"), JSON.stringify(scrollWrites));
+		assert.ok(scrollWrites.includes("\x1b[1T"), JSON.stringify(scrollWrites));
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 4", "line 5", "line 6", "line 7", "editor", "footer"],
+		);
+		tui.stop();
+	});
+
 	it("uses button-motion tracking inside terminal multiplexers", () => {
 		const environmentKeys = ["TMUX", "ZELLIJ", "STY", "TERM"] as const;
 		const previousEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));

@@ -79,6 +79,13 @@ const MAX_CACHED_OFFSCREEN_KITTY_IMAGES = 16;
 const MAX_CACHED_OFFSCREEN_KITTY_TRANSMISSION_BYTES = 32 * 1024 * 1024;
 const MAX_CACHED_OFFSCREEN_KITTY_DECODED_BYTES = 64 * 1024 * 1024;
 const DOUBLE_CLICK_INTERVAL_MS = 500;
+const WHEEL_BATCH_INTERVAL_MS = 4;
+const WHEEL_DRAIN_INTERVAL_MS = 16;
+const WHEEL_INSTANT_THRESHOLD = 5;
+const WHEEL_HIGH_PENDING = 12;
+const WHEEL_MEDIUM_STEP = 2;
+const WHEEL_HIGH_STEP = 3;
+const WHEEL_MAX_PENDING = 30;
 const wordSegmenter = getWordSegmenter();
 
 interface CachedKittyImage {
@@ -122,6 +129,25 @@ interface WheelEvent {
 	direction: -1 | 1;
 	x: number;
 	y: number;
+}
+
+interface WheelBatch {
+	lines: number;
+	x: number;
+	y: number;
+}
+
+interface PrimaryViewportSnapshot {
+	scrollView: ScrollView;
+	scrollTop: number;
+	top: number;
+	bottom: number;
+	fullWidth: boolean;
+}
+
+interface HardwareScrollPlan {
+	comparisonScreen: string[];
+	sequence: string;
 }
 
 interface ScrollbarDrag {
@@ -190,6 +216,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private lastDocument: string[] = [];
 	private previousScreenWidth = 0;
 	private previousScreenHeight = 0;
+	private previousPrimaryViewport?: PrimaryViewportSnapshot;
 	private layoutRoot: Component | undefined;
 	private currentLayout: LayoutFrame | undefined;
 	private readonly implicitDocument: Component;
@@ -214,7 +241,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private pressedUrl?: string;
 	/** Link span under the pointer, underlined so hovering shows it is clickable. */
 	private selectionDragged = false;
+	private pendingWheelBatches: WheelBatch[] = [];
+	private wheelBatchTimer?: NodeJS.Timeout;
 	private readonly wheelScrollLines: number;
+	private readonly adaptiveWheelDrain: boolean;
 	private readonly mouseEnabled: boolean;
 	private readonly searchMatchStyle: (text: string) => string;
 	private readonly searchCurrentMatchStyle: (text: string) => string;
@@ -241,6 +271,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.implicitScrollView = new ScrollView(this.implicitDocument, { follow: "end", primary: true });
 		this.flashes = new AltScreenFlashContainer(() => this.requestRender());
 		this.wheelScrollLines = Math.max(1, Math.floor(options.wheelScrollLines ?? 1));
+		this.adaptiveWheelDrain = ["orca", "vscode"].includes(process.env.TERM_PROGRAM?.toLowerCase() ?? "");
 		this.mouseEnabled = options.mouse ?? true;
 		this.searchMatchStyle = options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`);
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
@@ -281,6 +312,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStart(): void {
+		this.clearPendingWheelBatches();
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
 		this.stopScrollbarHover();
@@ -321,6 +353,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
+		this.clearPendingWheelBatches();
 		this.closeSearch();
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
@@ -417,20 +450,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.previousScreen = [];
 		this.previousScreenWidth = 0;
 		this.previousScreenHeight = 0;
+		this.previousPrimaryViewport = undefined;
 		this.currentLayout = undefined;
 	}
 
 	scrollBy(lines: number): void {
+		this.flushPendingWheelBatches();
 		this.getPrimaryScrollView().scrollBy(lines);
 		this.requestRender();
 	}
 
 	scrollToTop(): void {
+		this.flushPendingWheelBatches();
 		this.getPrimaryScrollView().scrollToStart();
 		this.requestRender();
 	}
 
 	scrollToBottom(): void {
+		this.flushPendingWheelBatches();
 		this.getPrimaryScrollView().scrollToEnd();
 		this.requestRender();
 	}
@@ -567,6 +604,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
+			this.flushPendingWheelBatches();
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
 			this.selectionPressActive = false;
@@ -585,14 +623,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.lastClick = undefined;
 			return { consume: true };
 		}
-		if (data === FOCUS_IN) return { consume: true };
+		if (data === FOCUS_IN) {
+			this.flushPendingWheelBatches();
+			return { consume: true };
+		}
 
 		const wheelEvent = this.parseWheelEvent(data);
 		if (wheelEvent) {
 			if (this.shouldDeferViewportInputToOverlay()) return undefined;
-			this.routeWheel(wheelEvent);
+			this.queueWheel(wheelEvent);
 			return { consume: true };
 		}
+		this.flushPendingWheelBatches();
 		const mouseEvent = this.parseSgrMouseEvent(data);
 		if (mouseEvent) {
 			if (this.handleRightClickPaste(mouseEvent)) return { consume: true };
@@ -699,18 +741,89 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return undefined;
 	}
 
-	private routeWheel(event: WheelEvent): void {
-		let remaining = event.direction * this.wheelScrollLines;
+	private queueWheel(event: WheelEvent): void {
+		const lines = event.direction * this.wheelScrollLines;
+		const last = this.pendingWheelBatches[this.pendingWheelBatches.length - 1];
+		if (last?.x === event.x && last.y === event.y) {
+			last.lines += lines;
+			if (last.lines === 0) this.pendingWheelBatches.pop();
+		} else {
+			this.pendingWheelBatches.push({ lines, x: event.x, y: event.y });
+		}
+		this.scheduleWheelDrain(WHEEL_BATCH_INTERVAL_MS);
+	}
+
+	private scheduleWheelDrain(delayMs: number): void {
+		if (this.wheelBatchTimer || this.pendingWheelBatches.length === 0) return;
+		this.wheelBatchTimer = setTimeout(() => {
+			this.wheelBatchTimer = undefined;
+			this.drainPendingWheelBatch();
+		}, delayMs);
+		this.wheelBatchTimer.unref();
+	}
+
+	private drainPendingWheelBatch(): void {
+		const batch = this.pendingWheelBatches[0];
+		if (!batch) return;
+		const lines = this.getWheelDrainLines(batch.lines);
+		const remaining = this.routeWheelBatch({ ...batch, lines });
+		if (remaining !== 0) {
+			this.pendingWheelBatches.shift();
+		} else {
+			batch.lines -= lines;
+			if (batch.lines === 0) this.pendingWheelBatches.shift();
+		}
+		this.scheduleWheelDrain(WHEEL_DRAIN_INTERVAL_MS);
+	}
+
+	private getWheelDrainLines(pending: number): number {
+		if (!this.adaptiveWheelDrain) return pending;
+		const sign = pending > 0 ? 1 : -1;
+		let absolute = Math.abs(pending);
+		let lines = 0;
+		if (absolute > WHEEL_MAX_PENDING) {
+			lines += absolute - WHEEL_MAX_PENDING;
+			absolute = WHEEL_MAX_PENDING;
+		}
+		lines +=
+			absolute <= WHEEL_INSTANT_THRESHOLD
+				? absolute
+				: absolute < WHEEL_HIGH_PENDING
+					? WHEEL_MEDIUM_STEP
+					: WHEEL_HIGH_STEP;
+		const viewportCap = Math.max(1, this.getPrimaryScrollView().viewportHeight - 1);
+		return sign * Math.min(lines, viewportCap);
+	}
+
+	private flushPendingWheelBatches(): void {
+		if (this.wheelBatchTimer) {
+			clearTimeout(this.wheelBatchTimer);
+			this.wheelBatchTimer = undefined;
+		}
+		const batches = this.pendingWheelBatches;
+		this.pendingWheelBatches = [];
+		for (const batch of batches) this.routeWheelBatch(batch);
+	}
+
+	private clearPendingWheelBatches(): void {
+		if (this.wheelBatchTimer) clearTimeout(this.wheelBatchTimer);
+		this.wheelBatchTimer = undefined;
+		this.pendingWheelBatches = [];
+	}
+
+	private routeWheelBatch(batch: WheelBatch): number {
+		let remaining = batch.lines;
 		const seen = new Set<ScrollView>();
-		for (const scrollView of this.currentLayout ? getScrollViewsAt(this.currentLayout, event.x, event.y) : []) {
+		for (const scrollView of this.currentLayout ? getScrollViewsAt(this.currentLayout, batch.x, batch.y) : []) {
 			seen.add(scrollView);
 			remaining = scrollView.scrollBy(remaining);
 			if (remaining === 0 || scrollView.overscroll === "contain") break;
 		}
 		const primary = this.getPrimaryScrollView();
 		if (remaining !== 0 && !seen.has(primary)) primary.scrollBy(remaining);
-		this.updateScrollbarHover(event.x, event.y);
+		this.updateScrollbarHover(batch.x, batch.y);
 		this.requestRender();
+		return remaining;
 	}
 
 	private parseSgrMouseEvent(data: string): SgrMouseEvent | undefined {
@@ -1397,6 +1510,73 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return false;
 	}
 
+	private getPrimaryViewportSnapshot(
+		layout: LayoutFrame,
+		width: number,
+		height: number,
+	): PrimaryViewportSnapshot | undefined {
+		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
+		const box = getScrollViewBox(layout, scrollView);
+		if (!box) return undefined;
+		const top = Math.max(0, box.rect.y, box.clip.y);
+		const bottom = Math.min(height, box.rect.y + box.rect.height, box.clip.y + box.clip.height);
+		if (bottom <= top) return undefined;
+		return {
+			scrollView,
+			scrollTop: scrollView.scrollTop,
+			top,
+			bottom,
+			fullWidth: box.rect.x === 0 && box.rect.width === width && box.clip.x === 0 && box.clip.width === width,
+		};
+	}
+
+	private getHardwareScrollPlan(
+		screen: string[],
+		nextViewport: PrimaryViewportSnapshot | undefined,
+	): HardwareScrollPlan | undefined {
+		const previousViewport = this.previousPrimaryViewport;
+		if (
+			!previousViewport ||
+			!nextViewport ||
+			!previousViewport.fullWidth ||
+			!nextViewport.fullWidth ||
+			previousViewport.scrollView !== nextViewport.scrollView ||
+			previousViewport.top !== nextViewport.top ||
+			previousViewport.bottom !== nextViewport.bottom
+		) {
+			return undefined;
+		}
+		const delta = nextViewport.scrollTop - previousViewport.scrollTop;
+		const regionHeight = nextViewport.bottom - nextViewport.top;
+		if (delta === 0 || Math.abs(delta) >= regionHeight) return undefined;
+		for (let row = nextViewport.top; row < nextViewport.bottom; row++) {
+			if (isImageLine(this.previousScreen[row] ?? "") || isImageLine(screen[row] ?? "")) return undefined;
+		}
+
+		const comparisonScreen = [...this.previousScreen];
+		for (let row = nextViewport.top; row < nextViewport.bottom; row++) {
+			const sourceRow = row + delta;
+			comparisonScreen[row] =
+				sourceRow >= nextViewport.top && sourceRow < nextViewport.bottom
+					? (this.previousScreen[sourceRow] ?? "")
+					: "";
+		}
+		let ordinaryWrites = 0;
+		let shiftedWrites = 0;
+		for (let row = 0; row < screen.length; row++) {
+			if (screen[row] !== this.previousScreen[row]) ordinaryWrites += 1;
+			if (screen[row] !== comparisonScreen[row]) shiftedWrites += 1;
+		}
+		if (shiftedWrites >= ordinaryWrites) return undefined;
+
+		const amount = Math.abs(delta);
+		const operation = delta > 0 ? "S" : "T";
+		return {
+			comparisonScreen,
+			sequence: `\x1b[0m\x1b[${nextViewport.top + 1};${nextViewport.bottom}r\x1b[${nextViewport.top + 1};1H\x1b[${amount}${operation}\x1b[r`,
+		};
+	}
+
 	private compositeFlashes(screen: string[], width: number, height: number): string[] {
 		const flashLines = this.flashes.render(width).slice(-height);
 		if (flashLines.length === 0) return screen;
@@ -1440,6 +1620,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			(line, row) =>
 				line !== this.previousScreen[row] && (isImageLine(line) || isImageLine(this.previousScreen[row] ?? "")),
 		);
+		const nextPrimaryViewport = this.getPrimaryViewportSnapshot(nextLayout, width, height);
+		const hardwareScroll =
+			fullRedraw || imagesNeedRedraw ? undefined : this.getHardwareScrollPlan(screen, nextPrimaryViewport);
+		const comparisonScreen = hardwareScroll?.comparisonScreen ?? this.previousScreen;
 		const redrawImages = fullRedraw || imagesNeedRedraw;
 		const hadUploadedKittyImages = this.uploadedKittyImages.size > 0;
 		const preparedKittyScreen =
@@ -1460,9 +1644,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			else if (this.imageProtocol === "kitty") buffer += deleteAllKittyPlacements();
 		}
 		buffer += preparedKittyScreen.evictedImageDeletion;
+		if (hardwareScroll) buffer += hardwareScroll.sequence;
 
 		for (let row = 0; row < height; row++) {
-			if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+			if (!fullRedraw && !imagesNeedRedraw && screen[row] === comparisonScreen[row]) continue;
 			// OSC 8 markers stay in `screen` (click resolution reads them back) but are
 			// stripped here so the terminal does not draw its own link underline.
 			buffer += `\x1b[${row + 1};1H\x1b[2K${stripOsc8(preparedKittyScreen.lines[row] ?? "")}`;
@@ -1482,6 +1667,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.previousScreen = screen;
 		this.previousScreenWidth = width;
 		this.previousScreenHeight = height;
+		this.previousPrimaryViewport = nextPrimaryViewport;
 		this.currentLayout = nextLayout;
 	}
 }
