@@ -3092,11 +3092,6 @@ export class AgentSession {
 
 		const oldLeafId = this.sessionManager.getLeafId();
 
-		// No-op if already at target
-		if (targetId === oldLeafId) {
-			return { cancelled: false };
-		}
-
 		// Model required for summarization
 		if (options.summarize && !this.model) {
 			throw new Error("No model available for summarization");
@@ -3105,6 +3100,17 @@ export class AgentSession {
 		const targetEntry = this.sessionManager.getEntry(targetId);
 		if (!targetEntry) {
 			throw new Error(`Entry ${targetId} not found`);
+		}
+
+		// Navigating to a user/custom message rewinds to its parent and returns its text,
+		// so it is still meaningful when that message is the current leaf.
+		const rewindsToParent =
+			targetEntry.type === "custom_message" ||
+			(targetEntry.type === "message" && targetEntry.message.role === "user");
+
+		// No-op if already at target
+		if (targetId === oldLeafId && !rewindsToParent) {
+			return { cancelled: false };
 		}
 
 		// Collect entries to summarize (from old leaf to common ancestor)

@@ -103,7 +103,11 @@ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
-import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
+import {
+	extensionForImageMimeType,
+	readClipboardImage,
+	splitClipboardImagePaths,
+} from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
@@ -223,6 +227,17 @@ function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionE
 
 function isCompactionCostNotice(item: RenderSessionItem): item is CompactionCostNotice {
 	return "type" in item && item.type === "compaction_cost";
+}
+
+/**
+ * True when an assistant message already showed something other than thinking:
+ * visible text or a tool call. Used to decide whether an interrupt can rewind
+ * the turn and hand the prompt back to the editor.
+ */
+function hasVisibleAssistantOutput(message: AssistantMessage): boolean {
+	return message.content.some(
+		(content) => (content.type === "text" && content.text.trim().length > 0) || content.type === "toolCall",
+	);
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -523,6 +538,11 @@ export class InteractiveMode {
 
 	// Auto-retry state
 	private retryEscapeHandler?: () => void;
+
+	// True once the current turn produced visible output (text or a tool call).
+	// While false, escape rewinds the turn and restores the prompt for editing.
+	private turnProducedOutput = false;
+	private restoringPrompt = false;
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -2926,7 +2946,11 @@ export class InteractiveMode {
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
 			if (this.session.isStreaming) {
-				this.restoreQueuedMessagesToEditor({ abort: true });
+				if (!this.turnProducedOutput && !this.restoringPrompt) {
+					void this.abortAndRestorePrompt();
+				} else {
+					this.restoreQueuedMessagesToEditor({ abort: true });
+				}
 			} else if (this.session.isBashRunning) {
 				this.session.abortBash();
 			} else if (this.isBashMode) {
@@ -3272,6 +3296,7 @@ export class InteractiveMode {
 			case "agent_start":
 				this.pendingTools.clear();
 				this.pendingToolGroups.clear();
+				this.turnProducedOutput = false;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3345,6 +3370,9 @@ export class InteractiveMode {
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
+					if (!this.turnProducedOutput && hasVisibleAssistantOutput(event.message)) {
+						this.turnProducedOutput = true;
+					}
 					this.streamingComponent.updateContent(this.streamingMessage, true);
 
 					for (const content of this.streamingMessage.content) {
@@ -4511,6 +4539,74 @@ export class InteractiveMode {
 			this.agent.abort();
 		}
 		return allQueued.length;
+	}
+
+	/**
+	 * Set editor text, re-collapsing pasted-image temp paths back into `[Image #N]`
+	 * chips so a restored prompt looks the way it did before submit.
+	 */
+	private setEditorTextWithImageChips(text: string): void {
+		const segments = splitClipboardImagePaths(text);
+		if (!this.editor.insertHiddenAtCursor || !segments.some((s) => s.type === "image")) {
+			this.editor.setText(text);
+			return;
+		}
+		this.editor.setText("");
+		for (const segment of segments) {
+			if (segment.type === "image") {
+				this.editor.insertHiddenAtCursor(segment.value, "Image");
+			} else {
+				this.editor.insertTextAtCursor?.(segment.value);
+			}
+		}
+	}
+
+	/**
+	 * Find the last user message entry on the current branch, walking up from the leaf.
+	 */
+	private findLastUserEntryOnBranch(): string | undefined {
+		let id = this.sessionManager.getLeafId();
+		while (id) {
+			const entry: SessionEntry | undefined = this.sessionManager.getEntry(id);
+			if (!entry) return undefined;
+			if (entry.type === "message" && entry.message.role === "user") return entry.id;
+			id = entry.parentId;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Interrupt a turn that has not produced visible output yet: abort it, drop the
+	 * unanswered user message from the branch, and put its text back in the editor.
+	 */
+	private async abortAndRestorePrompt(): Promise<void> {
+		const userEntryId = this.findLastUserEntryOnBranch();
+		if (!userEntryId) {
+			this.restoreQueuedMessagesToEditor({ abort: true });
+			return;
+		}
+
+		this.restoringPrompt = true;
+		try {
+			// Pull queued steer/follow-up messages back first, then stop the turn.
+			this.restoreQueuedMessagesToEditor();
+			await this.session.abort();
+
+			const result = await this.session.navigateTree(userEntryId);
+			if (result.cancelled) return;
+
+			this.chatContainer.clear();
+			this.renderInitialMessages();
+
+			const currentText = this.editor.getText();
+			const combined = [result.editorText ?? "", currentText].filter((t) => t.trim()).join("\n\n");
+			this.setEditorTextWithImageChips(combined);
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		} finally {
+			this.restoringPrompt = false;
+		}
 	}
 
 	private queueCompactionMessage(text: string, mode: "steer" | "followUp"): void {

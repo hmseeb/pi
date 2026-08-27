@@ -40,6 +40,24 @@ export function collapseClipboardImagePaths(
 	});
 }
 
+/**
+ * Split `text` into plain-text and pasted-clipboard-image-path segments, in order.
+ * Lets callers rebuild editor content with `[Image #N]` chips instead of temp paths.
+ */
+export function splitClipboardImagePaths(text: string): Array<{ type: "text" | "image"; value: string }> {
+	const segments: Array<{ type: "text" | "image"; value: string }> = [];
+	let lastIndex = 0;
+	for (const match of text.matchAll(new RegExp(CLIPBOARD_IMAGE_PATH_REGEX.source, "g"))) {
+		const before = text.slice(lastIndex, match.index);
+		if (before) segments.push({ type: "text", value: before });
+		segments.push({ type: "image", value: match[0] });
+		lastIndex = match.index + match[0].length;
+	}
+	const rest = text.slice(lastIndex);
+	if (rest) segments.push({ type: "text", value: rest });
+	return segments;
+}
+
 const DEFAULT_LIST_TIMEOUT_MS = 1000;
 const DEFAULT_READ_TIMEOUT_MS = 3000;
 const DEFAULT_POWERSHELL_TIMEOUT_MS = 5000;
