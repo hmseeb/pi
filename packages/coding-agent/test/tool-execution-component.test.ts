@@ -683,6 +683,54 @@ describe("compact tool calls", () => {
 		expect(callRenders).toBe(afterFirst);
 	});
 
+	test("a collapsed row is clickable and opens on activation", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition("bash"),
+			renderCall: () => new Text("$ npm test", 0, 0),
+			renderResult: () => new Text("output line", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-click",
+			{ command: "npm test" },
+			{},
+			toolDefinition,
+			createFakeViewportTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "output line" }], isError: false });
+		component.setCompact(true);
+
+		const collapsed = component.render(60);
+		expect(collapsed.some((line) => line.includes("pi-tool:tool-click"))).toBe(true);
+
+		expect(component.activateLink("pi-tool:tool-click")).toBe(true);
+		expect(component.render(60).map(stripAnsi).join("\n")).toContain("output line");
+	});
+
+	test("keeps the trimmed marker in the preview colour", () => {
+		const long = "rg -n 'pattern' --glob '*.ts' packages/coding-agent/src/modes/interactive | head -50";
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition("bash"),
+			renderCall: () => new Text(`$ ${long}`, 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-ellipsis",
+			{ command: long },
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setCompact(true);
+
+		const line = component.render(50)[1];
+
+		expect(stripAnsi(line)).toContain("…");
+		expect(line).not.toMatch(/\x1b\[0m[^\x1b]*…/);
+	});
+
 	test("stays fully rendered when compact is off", () => {
 		const component = createCompactComponent();
 

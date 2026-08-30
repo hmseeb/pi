@@ -11,7 +11,6 @@ import {
 	sliceByColumn,
 	Text,
 	type TUI,
-	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
@@ -334,7 +333,12 @@ export class ToolExecutionComponent extends Container {
 		const gap = 2;
 		const room = Math.max(0, width - visibleWidth(label) - gap - 1);
 		const preview = this.compactPreview(lines);
-		const body = room > 0 && preview ? `${" ".repeat(gap)}${truncateToWidth(theme.fg("muted", preview), room)}` : "";
+		// The shared helper emits a style reset before its ellipsis, which left the
+		// dots uncoloured. Slicing the plain text keeps the whole preview, ellipsis
+		// included, inside one colour span.
+		const clipped =
+			visibleWidth(preview) > room ? `${sliceByColumn(preview, 0, Math.max(0, room - 1), true)}…` : preview;
+		const body = room > 0 && preview ? `${" ".repeat(gap)}${theme.fg("muted", clipped)}` : "";
 		this.compactCache = ["", ` ${label}${body}`];
 		this.compactCacheWidth = width;
 		this.compactCacheStatus = status;
