@@ -123,7 +123,7 @@ import { BranchSummaryMessageComponent } from "./components/branch-summary-messa
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
-import { CustomMessageComponent } from "./components/custom-message.ts";
+import { CUSTOM_MESSAGE_LINK_PREFIX, CustomMessageComponent } from "./components/custom-message.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
@@ -3746,6 +3746,9 @@ export class InteractiveMode {
 						this.getMarkdownThemeWithSettings(),
 						this.outputPad,
 					);
+					// Notifications sit between tool calls and are part of the same
+					// work, so they follow the same collapsed presentation.
+					component.setCompact(!this.settingsManager.getGroupToolCalls(), this.ui);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 				}
@@ -4351,12 +4354,15 @@ export class InteractiveMode {
 	private openTranscriptLink(url: string): void {
 		for (const child of this.chatContainer.children) {
 			if (
-				(child instanceof ToolExecutionComponent || child instanceof ToolExecutionGroupComponent) &&
+				(child instanceof ToolExecutionComponent ||
+					child instanceof ToolExecutionGroupComponent ||
+					child instanceof CustomMessageComponent) &&
 				child.activateLink(url)
 			) {
 				return;
 			}
 		}
+		if (url.startsWith(CUSTOM_MESSAGE_LINK_PREFIX)) return;
 		if (!url.startsWith(TOOL_LINK_PREFIX)) openBrowser(url);
 	}
 
