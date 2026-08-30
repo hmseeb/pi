@@ -654,6 +654,35 @@ describe("compact tool calls", () => {
 		expect(text).toContain("built 48 files");
 	});
 
+	test("a collapsed row does not re-render its call each frame", () => {
+		let callRenders = 0;
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition("bash"),
+			renderCall: () => {
+				callRenders++;
+				return new Text("$ npm test", 0, 0);
+			},
+			renderResult: () => new Text("ok", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-cheap",
+			{ command: "npm test" },
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "ok" }], isError: false });
+		component.setCompact(true);
+
+		component.render(80);
+		const afterFirst = callRenders;
+		for (let i = 0; i < 20; i++) component.render(80);
+
+		expect(callRenders).toBe(afterFirst);
+	});
+
 	test("stays fully rendered when compact is off", () => {
 		const component = createCompactComponent();
 

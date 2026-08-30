@@ -24,6 +24,8 @@ import { keyHint } from "./keybinding-hints.ts";
 import { CachedLineMap } from "./render-cache.ts";
 
 const FALLBACK_PREVIEW_LINES = 10;
+/** Wide enough to keep a command on one line, narrow enough to stay cheap. */
+const COMPACT_PREVIEW_WIDTH = 400;
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -89,6 +91,10 @@ export class ToolExecutionComponent extends Container {
 	private imageWidthCells: number;
 	private isPartial = true;
 	private compact = false;
+	private compactPreviewText?: string;
+	private compactCache?: string[];
+	private compactCacheWidth?: number;
+	private compactCacheStatus?: string;
 	private toolDefinition?: ToolDefinition<any, any>;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
 	private ui: TUI;
@@ -217,6 +223,8 @@ export class ToolExecutionComponent extends Container {
 
 	updateArgs(args: any): void {
 		this.args = args;
+		this.compactPreviewText = undefined;
+		this.compactCache = undefined;
 		this.updateDisplay();
 	}
 
@@ -296,12 +304,13 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
-	 * The call flattened to one line: what was run, not what it printed. A wide
-	 * render keeps a long command on a single line, and the tool's own name is
-	 * dropped because the label already says it.
+	 * The call flattened to one line: what was run, not what it printed. It only
+	 * changes when the arguments do, so it is computed once and kept; flattening
+	 * per frame made scrolling stutter.
 	 */
 	private compactPreview(fallback: string[]): string {
-		const source = this.callRendererComponent?.render(4096) ?? fallback;
+		if (this.compactPreviewText !== undefined) return this.compactPreviewText;
+		const source = this.callRendererComponent?.render(COMPACT_PREVIEW_WIDTH) ?? fallback;
 		const joined = source
 			.map((line) => stripAnsi(line).trim())
 			.filter(Boolean)
@@ -310,19 +319,26 @@ export class ToolExecutionComponent extends Container {
 			.trim();
 		const withoutPrompt = joined.replace(/^[$>#]\s*/, "");
 		const label = this.toolName.toLowerCase();
-		return withoutPrompt.toLowerCase().startsWith(`${label} `)
+		this.compactPreviewText = withoutPrompt.toLowerCase().startsWith(`${label} `)
 			? withoutPrompt.slice(label.length + 1)
 			: withoutPrompt;
+		return this.compactPreviewText;
 	}
 
 	private renderCompactLine(width: number, lines: string[]): string[] {
 		const status = this.result?.isError ? "error" : this.isPartial ? "muted" : "toolTitle";
+		if (this.compactCache && this.compactCacheWidth === width && this.compactCacheStatus === status) {
+			return this.compactCache;
+		}
 		const label = theme.fg(status, this.compactLabel);
 		const gap = 2;
 		const room = Math.max(0, width - visibleWidth(label) - gap - 1);
 		const preview = this.compactPreview(lines);
 		const body = room > 0 && preview ? `${" ".repeat(gap)}${truncateToWidth(theme.fg("muted", preview), room)}` : "";
-		return ["", ` ${label}${body}`];
+		this.compactCache = ["", ` ${label}${body}`];
+		this.compactCacheWidth = width;
+		this.compactCacheStatus = status;
+		return this.compactCache;
 	}
 
 	activateLink(url: string): boolean {
@@ -348,6 +364,9 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private clearRenderCaches(): void {
+		this.compactCache = undefined;
+		this.compactCacheWidth = undefined;
+		this.compactCacheStatus = undefined;
 		this.linkCache.clear();
 		this.lineLinkCache.clear();
 		this.selfRenderCacheWidth = undefined;
@@ -358,6 +377,13 @@ export class ToolExecutionComponent extends Container {
 	override render(width: number): string[] {
 		if (this.hideComponent) {
 			return [];
+		}
+
+		// A collapsed row shows one line, so the box, result and images below it
+		// never need to be laid out.
+		if (this.compact && !this.expanded) {
+			const lines = this.renderCompactLine(width, []);
+			return this.decorateLinks(width, lines);
 		}
 
 		let lines: string[];
@@ -403,10 +429,11 @@ export class ToolExecutionComponent extends Container {
 			lines = super.render(width);
 		}
 
-		if (this.compact && !this.expanded) {
-			lines = this.renderCompactLine(width, lines);
-		}
+		return this.decorateLinks(width, lines);
+	}
 
+	/** Wraps rendered lines in the tool's hyperlink so clicking one expands it. */
+	private decorateLinks(width: number, lines: string[]): string[] {
 		if (!isViewportTUI(this.ui) || process.env.PI_DISABLE_TOOL_LINKS === "1" || process.env.TERM_PROGRAM === "Orca")
 			return lines;
 		const url = `${TOOL_LINK_PREFIX}${encodeURIComponent(this.toolCallId)}`;
