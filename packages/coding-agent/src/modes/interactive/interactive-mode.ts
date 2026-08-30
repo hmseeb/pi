@@ -2103,6 +2103,9 @@ export class InteractiveMode {
 
 	private addToolExecutionToChat(toolName: string, toolCallId: string, component: ToolExecutionComponent): void {
 		if (!this.settingsManager.getGroupToolCalls()) {
+			// Without grouping, each call still opens from one line rather than
+			// printing its whole box unasked.
+			component.setCompact(true);
 			component.setExpanded(this.toolOutputExpanded);
 			this.chatContainer.addChild(component);
 			return;

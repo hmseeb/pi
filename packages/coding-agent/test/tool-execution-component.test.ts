@@ -609,3 +609,56 @@ describe("ToolExecutionComponent parity", () => {
 		});
 	}
 });
+
+describe("compact tool calls", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	function createCompactComponent(): ToolExecutionComponent {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition("bash"),
+			renderCall: () => new Text("$ npm run build -- --watch", 0, 0),
+			renderResult: () => new Text("built 48 files\nno errors", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-compact",
+			{ command: "npm run build -- --watch" },
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "built 48 files" }], isError: false });
+		return component;
+	}
+
+	test("collapses a call to one titled line", () => {
+		const component = createCompactComponent();
+		component.setCompact(true);
+
+		const lines = component.render(80).map(stripAnsi);
+
+		expect(lines.filter((line) => line.trim().length > 0)).toEqual([" Bash  npm run build -- --watch"]);
+	});
+
+	test("expanding restores the full rendering", () => {
+		const component = createCompactComponent();
+		component.setCompact(true);
+		component.setExpanded(true);
+
+		const text = component.render(80).map(stripAnsi).join("\n");
+
+		expect(text).toContain("npm run build -- --watch");
+		expect(text).toContain("built 48 files");
+	});
+
+	test("stays fully rendered when compact is off", () => {
+		const component = createCompactComponent();
+
+		const text = component.render(80).map(stripAnsi).join("\n");
+
+		expect(text).toContain("built 48 files");
+	});
+});

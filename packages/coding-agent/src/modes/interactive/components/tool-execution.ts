@@ -11,6 +11,7 @@ import {
 	sliceByColumn,
 	Text,
 	type TUI,
+	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
@@ -87,6 +88,7 @@ export class ToolExecutionComponent extends Container {
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
+	private compact = false;
 	private toolDefinition?: ToolDefinition<any, any>;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
 	private ui: TUI;
@@ -272,6 +274,57 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	/**
+	 * Collapses the call to a single line until it is opened. Grouping already
+	 * hides ungrouped detail behind a summary; without it every call printed its
+	 * whole box, so the transcript read as output rather than as a conversation.
+	 */
+	setCompact(compact: boolean): void {
+		if (this.compact === compact) return;
+		this.compact = compact;
+		this.clearRenderCaches();
+		this.updateDisplay();
+	}
+
+	/** `bash` reads as `Bash`, `ast_grep` as `Ast Grep`. */
+	private get compactLabel(): string {
+		return this.toolName
+			.split(/[_\s-]+/)
+			.filter(Boolean)
+			.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+			.join(" ");
+	}
+
+	/**
+	 * The call flattened to one line: what was run, not what it printed. A wide
+	 * render keeps a long command on a single line, and the tool's own name is
+	 * dropped because the label already says it.
+	 */
+	private compactPreview(fallback: string[]): string {
+		const source = this.callRendererComponent?.render(4096) ?? fallback;
+		const joined = source
+			.map((line) => stripAnsi(line).trim())
+			.filter(Boolean)
+			.join(" ")
+			.replace(/\s+/g, " ")
+			.trim();
+		const withoutPrompt = joined.replace(/^[$>#]\s*/, "");
+		const label = this.toolName.toLowerCase();
+		return withoutPrompt.toLowerCase().startsWith(`${label} `)
+			? withoutPrompt.slice(label.length + 1)
+			: withoutPrompt;
+	}
+
+	private renderCompactLine(width: number, lines: string[]): string[] {
+		const status = this.result?.isError ? "error" : this.isPartial ? "muted" : "toolTitle";
+		const label = theme.fg(status, this.compactLabel);
+		const gap = 2;
+		const room = Math.max(0, width - visibleWidth(label) - gap - 1);
+		const preview = this.compactPreview(lines);
+		const body = room > 0 && preview ? `${" ".repeat(gap)}${truncateToWidth(theme.fg("muted", preview), room)}` : "";
+		return ["", ` ${label}${body}`];
+	}
+
 	activateLink(url: string): boolean {
 		if (url !== `${TOOL_LINK_PREFIX}${encodeURIComponent(this.toolCallId)}`) return false;
 		this.setExpanded(!this.expanded);
@@ -348,6 +401,10 @@ export class ToolExecutionComponent extends Container {
 			}
 		} else {
 			lines = super.render(width);
+		}
+
+		if (this.compact && !this.expanded) {
+			lines = this.renderCompactLine(width, lines);
 		}
 
 		if (!isViewportTUI(this.ui) || process.env.PI_DISABLE_TOOL_LINKS === "1" || process.env.TERM_PROGRAM === "Orca")
