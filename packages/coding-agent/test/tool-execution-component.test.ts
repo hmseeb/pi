@@ -731,6 +731,44 @@ describe("compact tool calls", () => {
 		expect(line).not.toMatch(/\x1b\[0m[^\x1b]*…/);
 	});
 
+	test("uses the tool's own verb, so viewing an image is not titled Read", () => {
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-image",
+			{ path: "/var/folders/9n/T/pi-clipboard-590c1dfe-6612-46ed-8719-06d301e21e00.png" },
+			{},
+			createReadToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setCompact(true);
+
+		const line = stripAnsi(component.render(60)[1]);
+
+		expect(line.trim()).toBe("View  [Image]");
+	});
+
+	test("keeps a command's first word in the preview", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition("bash"),
+			renderCall: () => new Text(theme.fg("toolTitle", "$ npm run build"), 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-verb",
+			{ command: "npm run build" },
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setCompact(true);
+
+		const line = stripAnsi(component.render(60)[1]);
+
+		expect(line.trim()).toBe("Bash  npm run build");
+	});
+
 	test("stays fully rendered when compact is off", () => {
 		const component = createCompactComponent();
 

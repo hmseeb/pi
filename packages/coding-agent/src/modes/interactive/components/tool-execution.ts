@@ -91,6 +91,7 @@ export class ToolExecutionComponent extends Container {
 	private isPartial = true;
 	private compact = false;
 	private compactPreviewText?: string;
+	private compactLabelText?: string;
 	private compactCache?: string[];
 	private compactCacheWidth?: number;
 	private compactCacheStatus?: string;
@@ -223,6 +224,7 @@ export class ToolExecutionComponent extends Container {
 	updateArgs(args: any): void {
 		this.args = args;
 		this.compactPreviewText = undefined;
+		this.compactLabelText = undefined;
 		this.compactCache = undefined;
 		this.updateDisplay();
 	}
@@ -293,9 +295,8 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
-	/** `bash` reads as `Bash`, `ast_grep` as `Ast Grep`. */
-	private get compactLabel(): string {
-		return this.toolName
+	private static titleCase(name: string): string {
+		return name
 			.split(/[_\s-]+/)
 			.filter(Boolean)
 			.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
@@ -303,13 +304,27 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * The tool's own verb when it renders one, so viewing an image reads `View`
+	 * rather than `Read view`. A renderer styles just the verb and then switches
+	 * colour for the argument, which is what distinguishes it from a command whose
+	 * first word happens to be short.
+	 */
+	private compactLabelFor(raw: string): string {
+		const verb = /^(?:\x1b\[[0-9;]*m)+([A-Za-z][\w-]*)(?:\x1b\[(?:39|0)m)/.exec(raw)?.[1];
+		return ToolExecutionComponent.titleCase(verb ?? this.toolName);
+	}
+
+	/**
 	 * The call flattened to one line: what was run, not what it printed. It only
 	 * changes when the arguments do, so it is computed once and kept; flattening
 	 * per frame made scrolling stutter.
 	 */
-	private compactPreview(fallback: string[]): string {
-		if (this.compactPreviewText !== undefined) return this.compactPreviewText;
+	private compactPreview(fallback: string[]): { label: string; preview: string } {
+		if (this.compactPreviewText !== undefined && this.compactLabelText !== undefined) {
+			return { label: this.compactLabelText, preview: this.compactPreviewText };
+		}
 		const source = this.callRendererComponent?.render(COMPACT_PREVIEW_WIDTH) ?? fallback;
+		const raw = source.join(" ");
 		const joined = source
 			.map((line) => stripAnsi(line).trim())
 			.filter(Boolean)
@@ -317,11 +332,15 @@ export class ToolExecutionComponent extends Container {
 			.replace(/\s+/g, " ")
 			.trim();
 		const withoutPrompt = joined.replace(/^[$>#]\s*/, "");
-		const label = this.toolName.toLowerCase();
-		this.compactPreviewText = withoutPrompt.toLowerCase().startsWith(`${label} `)
-			? withoutPrompt.slice(label.length + 1)
-			: withoutPrompt;
-		return this.compactPreviewText;
+		const label = this.compactLabelFor(raw);
+		const leading = withoutPrompt.split(" ")[0]?.toLowerCase() ?? "";
+		// The label already says which tool ran, so its own name is redundant.
+		this.compactPreviewText =
+			leading === label.toLowerCase() || leading === this.toolName.toLowerCase()
+				? withoutPrompt.slice(leading.length + 1)
+				: withoutPrompt;
+		this.compactLabelText = label;
+		return { label, preview: this.compactPreviewText };
 	}
 
 	private renderCompactLine(width: number, lines: string[]): string[] {
@@ -329,10 +348,10 @@ export class ToolExecutionComponent extends Container {
 		if (this.compactCache && this.compactCacheWidth === width && this.compactCacheStatus === status) {
 			return this.compactCache;
 		}
-		const label = theme.fg(status, this.compactLabel);
+		const { label: labelText, preview } = this.compactPreview(lines);
+		const label = theme.fg(status, labelText);
 		const gap = 2;
 		const room = Math.max(0, width - visibleWidth(label) - gap - 1);
-		const preview = this.compactPreview(lines);
 		// The shared helper emits a style reset before its ellipsis, which left the
 		// dots uncoloured. Slicing the plain text keeps the whole preview, ellipsis
 		// included, inside one colour span.
