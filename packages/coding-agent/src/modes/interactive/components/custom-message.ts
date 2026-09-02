@@ -125,7 +125,9 @@ export class CustomMessageComponent extends Container {
 		if (this.compact && !this._expanded && !this.customComponent) {
 			return this.renderCompactLine(width);
 		}
-		return super.render(width);
+		const lines = super.render(width);
+		const linkable = this.compact && this.ui && isViewportTUI(this.ui) && process.env.PI_DISABLE_TOOL_LINKS !== "1";
+		return linkable ? lines.map((line) => hyperlink(line, this.linkUrl)) : lines;
 	}
 
 	setOutputPad(outputPad: number): void {
