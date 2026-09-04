@@ -1,10 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Editor } from "../src/components/editor.ts";
-import { Text } from "../src/components/text.ts";
-import { VStack } from "../src/components/v-stack.ts";
-import { getMouseTargetsAt, renderLayoutFrame } from "../src/layout.ts";
-import { Container, type TUI } from "../src/tui.ts";
+import type { TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
@@ -14,8 +11,24 @@ function createTestTUI(cols = 80, rows = 24): TUI {
 	return new TuiMainScreen(new VirtualTerminal(cols, rows));
 }
 
+function mouseEvent(type: "click" | "drag" | "release", button: "left" | "right", x: number, y: number, width = 40) {
+	return {
+		type,
+		button,
+		x,
+		y,
+		screenX: x,
+		screenY: y,
+		width,
+		height: 24,
+		shift: false,
+		alt: false,
+		ctrl: false,
+	} as const;
+}
+
 function press(editor: Editor, x: number, y: number, width = 40): boolean {
-	return editor.handleMouse({ x, y, width, button: 0, action: "press" });
+	return Boolean(editor.handleMouse(mouseEvent("click", "left", x, y, width)));
 }
 
 /**
@@ -160,9 +173,9 @@ describe("editor mouse click-to-position", () => {
 		editor.setText("hello world");
 		editor.render(40);
 
-		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, width: 40, button: 2, action: "press" }), false);
-		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, width: 40, button: 0, action: "drag" }), false);
-		assert.strictEqual(editor.handleMouse({ x: 3, y: 1, width: 40, button: 0, action: "release" }), false);
+		assert.strictEqual(editor.handleMouse(mouseEvent("click", "right", 3, 1)), undefined);
+		assert.strictEqual(editor.handleMouse(mouseEvent("drag", "left", 3, 1)), undefined);
+		assert.strictEqual(editor.handleMouse(mouseEvent("release", "left", 3, 1)), undefined);
 	});
 
 	it("keeps the caret out of the interior of a collapsed paste marker", () => {
@@ -280,80 +293,5 @@ describe("editor click with a decorated horizontal origin", () => {
 		const cursor = findCursor(editor.render(boxWidth));
 		assert.strictEqual(cursor.row, 2, "caret should stay on the clicked visual row");
 		assert.strictEqual(cursor.col, prefixWidth + 1);
-	});
-});
-
-describe("layout mouse routing", () => {
-	it("hit-tests the editor through the layout tree and offsets coordinates", () => {
-		const tui = createTestTUI(40, 24);
-		const editor = new Editor(tui, defaultEditorTheme);
-		editor.focused = true;
-		editor.setText("hello world");
-
-		// A header pushes the editor down, so its rect.y is non-zero and screen
-		// coordinates must be translated before reaching the component.
-		const root = new VStack([{ component: new Text("header", 0, 0) }, { component: editor }]);
-		const frame = renderLayoutFrame(root, 40, 24, () => {});
-
-		const target = getMouseTargetsAt(frame, 5, 2)[0];
-		assert.ok(target, "expected to hit a mouse-handling component");
-		assert.strictEqual(target.component, editor);
-		assert.strictEqual(target.rect.y, 1, "editor sits below the 1-line header");
-
-		// Screen y=2 maps to box-local y=1, the first text row.
-		const consumed = target.component.handleMouse?.({
-			x: 5 - target.rect.x,
-			y: 2 - target.rect.y,
-			width: target.rect.width,
-			button: 0,
-			action: "press",
-		});
-		assert.strictEqual(consumed, true);
-		assert.strictEqual(findCursor(editor.render(40)).col, 5);
-	});
-
-	it("routes through a Container to the editor nested inside it", () => {
-		// Containers flatten children into one block of lines, so the editor gets no
-		// layout box of its own; the Container must rebase and forward the event.
-		const tui = createTestTUI(40, 24);
-		const editor = new Editor(tui, defaultEditorTheme);
-		editor.focused = true;
-		editor.setText("hello world");
-
-		const container = new Container();
-		container.addChild(new Text("header", 0, 0));
-		container.addChild(editor);
-
-		const frame = renderLayoutFrame(container, 40, 24, () => {});
-		const targets = getMouseTargetsAt(frame, 5, 2);
-		assert.ok(targets.length > 0, "expected the container to be a mouse target");
-
-		let consumed = false;
-		for (const target of targets) {
-			if (
-				target.component.handleMouse?.({
-					x: 5 - target.rect.x,
-					y: 2 - target.rect.y,
-					width: target.rect.width,
-					button: 0,
-					action: "press",
-				})
-			) {
-				consumed = true;
-				break;
-			}
-		}
-		assert.strictEqual(consumed, true, "click should reach the nested editor");
-		assert.strictEqual(findCursor(editor.render(40)).col, 5);
-	});
-
-	it("never targets a component that does not implement handleMouse", () => {
-		const text = new Text("plain", 0, 0);
-		const frame = renderLayoutFrame(new VStack([{ component: text }]), 40, 24, () => {});
-		const targets = getMouseTargetsAt(frame, 2, 0);
-		assert.ok(
-			!targets.some((target) => target.component === text),
-			"a component without handleMouse must never be offered the event",
-		);
 	});
 });

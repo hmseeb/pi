@@ -2,9 +2,6 @@
  * Minimal TUI implementation with differential rendering
  */
 
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
 	beginCursorFrame,
@@ -26,33 +23,98 @@ import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-imag
 import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
 
 /**
- * A mouse event delivered to a component, in coordinates local to that
- * component's layout box: `x`/`y` are relative to the box's `rect.x`/`rect.y`,
- * so a component never needs to know where it sits on screen.
+ * Component interface - all components must implement this
  */
-export interface ComponentMouseEvent {
-	/** Column relative to the component's layout box. */
+export type TuiMouseEventType = "press" | "release" | "move" | "drag" | "click" | "wheel";
+export type TuiMouseButton = "left" | "middle" | "right" | "none";
+
+/** Normalized cell-based mouse event. Coordinates are zero-based. */
+export interface TuiMouseEvent {
+	type: TuiMouseEventType;
+	button: TuiMouseButton;
+	/** Coordinates local to the receiving component. */
 	x: number;
-	/** Row relative to the component's layout box. */
 	y: number;
-	/**
-	 * Width of the layout box the coordinates are relative to.
-	 *
-	 * A component that renders decorated by a subclass or wrapper receives a
-	 * width smaller than this. Comparing the two recovers how far its own
-	 * content was shifted right, which no other information in the event
-	 * exposes. Containers pass this through unchanged because they lay children
-	 * out at full width.
-	 */
+	/** Absolute terminal coordinates. */
+	screenX: number;
+	screenY: number;
+	/** Current component bounds. */
 	width: number;
-	/** Raw SGR button code with modifier/motion bits masked off (0 = left). */
-	button: number;
-	action: "press" | "release" | "drag";
+	height: number;
+	shift: boolean;
+	alt: boolean;
+	ctrl: boolean;
+	/** Logical lines. Negative values scroll up. */
+	wheelDelta?: number;
+	/** Consecutive click count when type is click. */
+	clickCount?: number;
+}
+
+export interface TuiMouseEventResult {
+	/** Stop propagation and suppress renderer-level fallback behavior. */
+	handled?: boolean;
+	/** Route subsequent drag/release events to this component. Implies handled. */
+	capture?: boolean;
+	/** Give keyboard focus to this component. Implies handled. */
+	focus?: boolean;
+	/**
+	 * Explicitly request or suppress a render. Move and release default to false;
+	 * press, click, drag, and wheel default to true.
+	 */
+	render?: boolean;
+}
+
+/** Internal target metadata used by containers and alternate-screen dispatch. */
+export interface TuiMouseDispatchTarget {
+	component: Component;
+	originX: number;
+	originY: number;
+	width: number;
+	height: number;
+}
+
+/** Result of dispatching to a concrete component. */
+export interface TuiMouseDispatchResult extends TuiMouseEventResult {
+	handled: true;
+	target: TuiMouseDispatchTarget;
+	/** Keyboard focus target, which may be a delegating parent container. */
+	focusTarget?: Component;
 }
 
 /**
- * Component interface - all components must implement this
+ * Dispatch an event to a component and retain the exact target and coordinate
+ * transform. Containers use this when forwarding events to nested children.
  */
+export function dispatchMouseEvent(component: Component, event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+	const result = component.handleMouse?.(event);
+	if (!result) return undefined;
+	if ("target" in result) return result as TuiMouseDispatchResult;
+	if (!result.handled && !result.capture && !result.focus) return undefined;
+	return {
+		...result,
+		handled: true,
+		...(result.focus ? { focusTarget: component } : {}),
+		target: {
+			component,
+			originX: event.screenX - event.x,
+			originY: event.screenY - event.y,
+			width: event.width,
+			height: event.height,
+		},
+	};
+}
+
+/** Recreate local coordinates for a previously dispatched mouse target. */
+export function retargetMouseEvent(event: TuiMouseEvent, target: TuiMouseDispatchTarget): TuiMouseEvent {
+	return {
+		...event,
+		x: event.screenX - target.originX,
+		y: event.screenY - target.originY,
+		width: target.width,
+		height: target.height,
+	};
+}
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
@@ -61,17 +123,11 @@ export interface Component {
 	 */
 	render(width: number): string[];
 
-	/**
-	 * Optional handler for keyboard input when component has focus
-	 */
+	/** Optional handler for keyboard input when component has focus. */
 	handleInput?(data: string): void;
 
-	/**
-	 * Optional handler for mouse events landing inside this component's layout
-	 * box. Coordinates are box-local. Return true to consume the event, which
-	 * suppresses the default viewport behaviour (text selection) for it.
-	 */
-	handleMouse?(event: ComponentMouseEvent): boolean;
+	/** Optional normalized mouse handler. */
+	handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
 
 	/**
 	 * If true, component receives key release events (Kitty protocol).
@@ -108,13 +164,6 @@ export interface Focusable {
 /** Type guard to check if a component implements Focusable */
 export function isFocusable(component: Component | null): component is Component & Focusable {
 	return component !== null && "focused" in component;
-}
-
-/** Type guard to check if a component opts into mouse events */
-export function hasMouseHandler(
-	component: Component | null,
-): component is Component & Required<Pick<Component, "handleMouse">> {
-	return component !== null && typeof component.handleMouse === "function";
 }
 
 /**
@@ -214,6 +263,14 @@ export interface OverlayUnfocusOptions {
 	target: Component | null;
 }
 
+/** Last rendered terminal-relative overlay rectangle. */
+export interface OverlayBounds {
+	row: number;
+	col: number;
+	width: number;
+	height: number;
+}
+
 /**
  * Handle returned by showOverlay for controlling the overlay
  */
@@ -230,6 +287,8 @@ export interface OverlayHandle {
 	unfocus(options?: OverlayUnfocusOptions): void;
 	/** Check if this overlay currently has focus */
 	isFocused(): boolean;
+	/** Get the most recent rendered bounds for a visible overlay. */
+	getBounds(): OverlayBounds | undefined;
 }
 
 type OverlayStackEntry = {
@@ -238,6 +297,15 @@ type OverlayStackEntry = {
 	preFocus: Component | null;
 	hidden: boolean;
 	focusOrder: number;
+	bounds?: OverlayBounds;
+};
+
+type RenderedOverlayLayout = {
+	entry: OverlayStackEntry;
+	row: number;
+	col: number;
+	width: number;
+	height: number;
 };
 
 type OverlayBlockedFocusResume = { status: "restore-overlay" } | { status: "focus-target"; target: Component | null };
@@ -257,102 +325,63 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
  */
 export class Container implements Component {
 	children: Component[] = [];
-	private renderCacheWidth: number | undefined;
-	private renderCacheChildLines: string[][] | undefined;
-	private renderCacheLines: string[] | undefined;
+	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
 
 	addChild(component: Component): void {
 		this.children.push(component);
-		this.clearRenderCache();
 	}
 
 	removeChild(component: Component): void {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
-			this.clearRenderCache();
 		}
 	}
 
 	clear(): void {
 		this.children = [];
-		this.clearRenderCache();
 	}
 
 	invalidate(): void {
-		this.clearRenderCache();
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
 	}
 
-	protected clearRenderCache(): void {
-		this.renderCacheWidth = undefined;
-		this.renderCacheChildLines = undefined;
-		this.renderCacheLines = undefined;
+	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+		if (event.y < 0 || event.y >= event.height) return undefined;
+		const mouseChildren =
+			this.mouseLayout?.width === event.width
+				? this.mouseLayout.children
+				: this.children.map((component) => ({ component, height: component.render(event.width).length }));
+		let childY = 0;
+		for (const { component: child, height: childHeight } of mouseChildren) {
+			if (event.y >= childY && event.y < childY + childHeight) {
+				const result = dispatchMouseEvent(child, {
+					...event,
+					y: event.y - childY,
+					height: childHeight,
+				});
+				if (result?.focus && (this as Component).handleInput) return { ...result, focusTarget: this };
+				return result;
+			}
+			childY += childHeight;
+		}
+		return undefined;
 	}
 
-	/**
-	 * Concatenate child output, reusing the previous array when no child
-	 * re-rendered. Components cache their own lines and return the same array
-	 * reference while unchanged, so identity comparison is enough to detect a
-	 * repeat frame. Without this, every animation frame rebuilds an array of the
-	 * whole document and callers that post-process the result (hyperlinking,
-	 * width measurement) redo that work for every line on every frame.
-	 *
-	 * Callers must treat the result as read-only; mutate a copy instead.
-	 */
 	render(width: number): string[] {
-		const childCount = this.children.length;
-		const childLines: string[][] = new Array(childCount);
-		let reusable =
-			this.renderCacheLines !== undefined &&
-			this.renderCacheWidth === width &&
-			this.renderCacheChildLines?.length === childCount;
-		for (let i = 0; i < childCount; i++) {
-			const lines = this.children[i]!.render(width);
-			childLines[i] = lines;
-			if (reusable && this.renderCacheChildLines![i] !== lines) reusable = false;
-		}
-		if (reusable) return this.renderCacheLines!;
-
 		const lines: string[] = [];
-		for (let i = 0; i < childCount; i++) {
-			for (const line of childLines[i]!) {
+		const mouseChildren: Array<{ component: Component; height: number }> = [];
+		for (const child of this.children) {
+			const childLines = child.render(width);
+			mouseChildren.push({ component: child, height: childLines.length });
+			for (const line of childLines) {
 				lines.push(line);
 			}
 		}
-		this.renderCacheWidth = width;
-		this.renderCacheChildLines = childLines;
-		this.renderCacheLines = lines;
+		this.mouseLayout = { width, children: mouseChildren };
 		return lines;
-	}
-
-	/**
-	 * Forward a mouse event to the child that rendered the targeted row.
-	 *
-	 * A Container concatenates its children's lines into one block, so children
-	 * never receive their own layout box and are invisible to layout-level hit
-	 * testing. Row ranges are recovered from the per-child line arrays captured
-	 * during the last render, and `y` is rebased so each child still sees
-	 * coordinates local to itself.
-	 *
-	 * `x` and `width` pass through unchanged: children are laid out at the
-	 * container's full width and share its left edge.
-	 */
-	handleMouse(event: ComponentMouseEvent): boolean {
-		const childLines = this.renderCacheChildLines;
-		if (!childLines) return false;
-		let offset = 0;
-		for (let i = 0; i < childLines.length; i++) {
-			const height = childLines[i]!.length;
-			const child = this.children[i];
-			if (child && event.y >= offset && event.y < offset + height) {
-				return child.handleMouse?.({ ...event, y: event.y - offset }) ?? false;
-			}
-			offset += height;
-		}
-		return false;
 	}
 }
 
@@ -360,8 +389,6 @@ export class Container implements Component {
  * TUI - Main class for managing terminal UI with differential rendering
  */
 const SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
-
-// DECSET 1004 focus reporting: terminal reports window/pane focus changes.
 const ENABLE_FOCUS_REPORTING = "\x1b[?1004h";
 const DISABLE_FOCUS_REPORTING = "\x1b[?1004l";
 const FOCUS_IN = "\x1b[I";
@@ -448,7 +475,6 @@ export function isViewportTUI(tui: TUI): tui is ViewportTUI {
 
 export abstract class TuiBase extends Container implements TUI {
 	abstract readonly mode: TuiMode;
-	/** True when this TUI positions the hardware cursor on the caret each render. */
 	protected readonly positionsHardwareCursor: boolean = false;
 	public terminal: Terminal;
 	private focusedComponent: Component | null = null;
@@ -461,21 +487,22 @@ export abstract class TuiBase extends Container implements TUI {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
-	/** Whether pi has requested DECSCUSR blinking-block for the parked cursor. */
+	private showHardwareCursor = false;
 	private hardwareBlockCursorActive = false;
-	private clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1";
+	private clearOnShrink = false;
 	protected fullRedrawCount = 0;
 	protected stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
 	private terminalColorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
 	private terminalColorSchemeNotificationsEnabled = false;
-	protected readonly logDirectory: string;
+	/** Directory for debug/crash logs. When undefined, debug logging is disabled and crash dumps fall back to the OS temp directory. */
+	protected readonly logDirectory: string | undefined;
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
 	private overlayStack: OverlayStackEntry[] = [];
+	private renderedOverlayLayouts: RenderedOverlayLayout[] = [];
 
 	get hasOverlayEntries(): boolean {
 		return this.overlayStack.length > 0;
@@ -485,166 +512,13 @@ export abstract class TuiBase extends Container implements TUI {
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string) {
 		super();
 		this.terminal = terminal;
-		this.logDirectory = logDirectory ?? process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+		this.logDirectory = logDirectory;
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
 	}
 
-	/**
-	 * The root render result is post-processed in place (cursor marker stripping,
-	 * line resets), so it must not be a shared cached array. Roots hold a handful
-	 * of children, so skipping Container's cache costs nothing.
-	 */
-	override render(width: number): string[] {
-		const perf = this.perfEnabled ? performance.now() : 0;
-		const lines: string[] = [];
-		for (const child of this.children) {
-			for (const line of child.render(width)) {
-				lines.push(line);
-			}
-		}
-		if (this.perfEnabled) this.perfTreeMs += performance.now() - perf;
-		return lines;
-	}
-
 	protected abstract doRender(): void;
-
-	// ---------------------------------------------------------------------
-	// Render profiler. ON by default so lag can be diagnosed after the fact.
-	// Set PI_PERF=0 to disable.
-	//
-	// Cost control: the profiler must never itself cause the lag it measures.
-	// Log lines are buffered in memory and flushed with a single appendFileSync
-	// at most once per second, never from inside a frame. Slow-frame lines are
-	// capped per window so a pathological session cannot spam the disk.
-	// ---------------------------------------------------------------------
-	protected readonly perfEnabled = process.env.PI_PERF !== "0";
-	private static readonly PERF_SLOW_FRAME_MS = 8;
-	private static readonly PERF_MAX_SLOW_LINES_PER_WINDOW = 5;
-	private static readonly PERF_MAX_LOG_BYTES = 5 * 1024 * 1024;
-	protected perfTreeMs = 0;
-	protected perfBytes = 0;
-	private perfFrames = 0;
-	private perfTotalMs = 0;
-	private perfMaxMs = 0;
-	private perfFullRedraws = 0;
-	private perfWindowStart = 0;
-	private perfLastLineCount = 0;
-	private perfPending: string[] = [];
-	private perfSlowLinesThisWindow = 0;
-	private perfSlowSuppressed = 0;
-	private perfLogPath: string | undefined;
-
-	protected perfNoteBytes(data: string): void {
-		if (this.perfEnabled) this.perfBytes += data.length;
-	}
-
-	protected perfNoteLineCount(count: number): void {
-		if (this.perfEnabled) this.perfLastLineCount = count;
-	}
-
-	private runRenderFrame(): void {
-		this.beginRenderFrame();
-		if (!this.perfEnabled) {
-			this.doRender();
-			return;
-		}
-		const startedAt = performance.now();
-		const redrawsBefore = this.fullRedrawCount;
-		this.perfTreeMs = 0;
-		this.perfBytes = 0;
-		this.doRender();
-		const frameMs = performance.now() - startedAt;
-		this.perfFrames++;
-		this.perfTotalMs += frameMs;
-		if (frameMs > this.perfMaxMs) this.perfMaxMs = frameMs;
-		this.perfFullRedraws += this.fullRedrawCount - redrawsBefore;
-		const treeMs = this.perfTreeMs;
-		const bytes = this.perfBytes;
-		this.perfWindowBytes += bytes;
-		this.perfWindowTreeMs += treeMs;
-		if (frameMs >= TuiBase.PERF_SLOW_FRAME_MS) {
-			if (this.perfSlowLinesThisWindow < TuiBase.PERF_MAX_SLOW_LINES_PER_WINDOW) {
-				this.perfSlowLinesThisWindow++;
-				this.perfWrite(
-					`SLOW frame=${frameMs.toFixed(1)}ms tree=${treeMs.toFixed(1)}ms ` +
-						`diff+write=${(frameMs - treeMs).toFixed(1)}ms bytes=${bytes} lines=${this.perfLastLineCount}` +
-						`${this.fullRedrawCount > redrawsBefore ? " FULL_REDRAW" : ""}`,
-				);
-			} else {
-				this.perfSlowSuppressed++;
-			}
-		}
-		const now = performance.now();
-		if (this.perfWindowStart === 0) this.perfWindowStart = now;
-		if (now - this.perfWindowStart >= 1000) {
-			// Only worth a line when something actually happened this second.
-			const noteworthy =
-				this.perfFullRedraws > 0 ||
-				this.perfMaxMs >= TuiBase.PERF_SLOW_FRAME_MS ||
-				this.perfWindowBytes > 512 * 1024;
-			if (noteworthy) {
-				this.perfWrite(
-					`1s frames=${this.perfFrames} avg=${(this.perfTotalMs / this.perfFrames).toFixed(2)}ms ` +
-						`max=${this.perfMaxMs.toFixed(1)}ms tree=${this.perfWindowTreeMs.toFixed(0)}ms ` +
-						`fullRedraws=${this.perfFullRedraws} bytesOut=${(this.perfWindowBytes / 1024).toFixed(0)}KB ` +
-						`lines=${this.perfLastLineCount}` +
-						`${this.perfSlowSuppressed > 0 ? ` (+${this.perfSlowSuppressed} more slow frames)` : ""}`,
-				);
-			}
-			this.perfFrames = 0;
-			this.perfTotalMs = 0;
-			this.perfMaxMs = 0;
-			this.perfFullRedraws = 0;
-			this.perfWindowBytes = 0;
-			this.perfWindowTreeMs = 0;
-			this.perfSlowLinesThisWindow = 0;
-			this.perfSlowSuppressed = 0;
-			this.perfWindowStart = now;
-			this.perfFlush();
-		}
-	}
-
-	private perfWindowBytes = 0;
-	private perfWindowTreeMs = 0;
-
-	/** Queue a profiler line. Never touches the filesystem; see perfFlush(). */
-	protected perfWrite(message: string): void {
-		if (!this.perfEnabled) return;
-		this.perfPending.push(`[${new Date().toISOString()}] ${message}\n`);
-	}
-
-	/** Flush queued profiler lines in one syscall. Called at most once per second. */
-	protected perfFlush(): void {
-		if (this.perfPending.length === 0) return;
-		const batch = this.perfPending.join("");
-		this.perfPending = [];
-		try {
-			if (this.perfLogPath === undefined) {
-				this.perfLogPath = path.join(this.logDirectory, "pi-perf.log");
-				fs.mkdirSync(path.dirname(this.perfLogPath), { recursive: true });
-				// Rotate once at startup if the previous log grew too large.
-				const size = fs.statSync(this.perfLogPath, { throwIfNoEntry: false })?.size ?? 0;
-				if (size > TuiBase.PERF_MAX_LOG_BYTES) {
-					fs.renameSync(this.perfLogPath, `${this.perfLogPath}.1`);
-				}
-			}
-			fs.appendFileSync(this.perfLogPath, batch);
-		} catch {
-			// profiling must never break the TUI
-		}
-	}
-
-	/**
-	 * Per-frame cursor bookkeeping. `positionsHardwareCursor` is a subclass
-	 * capability: only a TUI that parks the real cursor on CURSOR_MARKER can
-	 * delegate the unfocused hollow cursor to the terminal.
-	 */
-	private beginRenderFrame(): void {
-		setHardwareHollowCursor(this.positionsHardwareCursor);
-		beginCursorFrame();
-	}
 
 	protected resetRenderState(): void {}
 
@@ -661,23 +535,14 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	getShowHardwareCursor(): boolean {
-		// A focused component drew a caret and this TUI parks the real cursor on it.
-		// Keep it visible in both window-focus states: Ghostty blinks the block while
-		// focused and changes that exact cell-sized block to block_hollow when not.
 		if (isHardwareHollowCursorEnabled() && hasRenderedCursor()) return true;
 		return this.showHardwareCursor;
 	}
 
-	/**
-	 * Request a native blinking block once per TUI lifetime. Shells can leave a
-	 * pane's cursor as a bar or underline; pi needs a block so Ghostty can turn
-	 * that exact full cell into block_hollow on focus loss. The style deliberately
-	 * stays active across focus changes and is restored in stop().
-	 */
 	protected activateHardwareBlockCursor(): string {
 		if (this.hardwareBlockCursorActive) return "";
 		this.hardwareBlockCursorActive = true;
-		return "\x1b[1 q"; // DECSCUSR 1: blinking block
+		return "\x1b[1 q";
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {
@@ -695,8 +560,8 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/**
 	 * Set whether to trigger full re-render when content shrinks.
-	 * When true (default), empty rows are cleared when content shrinks.
-	 * When false, empty rows remain (reduces redraws on slower terminals).
+	 * When true, empty rows are cleared when content shrinks.
+	 * When false (default), empty rows remain (reduces redraws on slower terminals).
 	 */
 	setClearOnShrink(enabled: boolean): void {
 		this.clearOnShrink = enabled;
@@ -929,6 +794,10 @@ export abstract class TuiBase extends Container implements TUI {
 				this.requestRender();
 			},
 			isFocused: () => this.focusedComponent === component,
+			getBounds: () => {
+				if (!this.overlayStack.includes(entry) || !this.isOverlayVisible(entry) || !entry.bounds) return undefined;
+				return { ...entry.bounds };
+			},
 		};
 	}
 
@@ -958,6 +827,46 @@ export abstract class TuiBase extends Container implements TUI {
 		return this.overlayStack.some(
 			(entry) => entry.component === this.focusedComponent && this.isOverlayVisible(entry),
 		);
+	}
+
+	/** Keep overlay containers as keyboard focus owners when a nested control is clicked. */
+	protected resolveMouseFocusTarget(component: Component): Component {
+		for (let index = this.overlayStack.length - 1; index >= 0; index--) {
+			const overlay = this.overlayStack[index]!;
+			if (this.isOverlayVisible(overlay) && this.containsComponent(overlay.component, component)) {
+				return overlay.component;
+			}
+		}
+		return component;
+	}
+
+	/** Dispatch to the visually topmost overlay under the pointer. */
+	protected dispatchMouseToOverlay(event: TuiMouseEvent): { hit: boolean; result?: TuiMouseDispatchResult } {
+		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
+			const layout = this.renderedOverlayLayouts[index]!;
+			if (
+				event.screenX < layout.col ||
+				event.screenX >= layout.col + layout.width ||
+				event.screenY < layout.row ||
+				event.screenY >= layout.row + layout.height
+			) {
+				continue;
+			}
+			const result = dispatchMouseEvent(layout.entry.component, {
+				...event,
+				x: event.screenX - layout.col,
+				y: event.screenY - layout.row,
+				width: layout.width,
+				height: layout.height,
+			});
+			return result
+				? {
+						hit: true,
+						result: result.focus ? { ...result, focusTarget: layout.entry.component } : result,
+					}
+				: { hit: true };
+		}
+		return { hit: false };
 	}
 
 	/** Check if an overlay entry is currently visible */
@@ -995,8 +904,6 @@ export abstract class TuiBase extends Container implements TUI {
 		);
 		this.afterTerminalStart();
 		this.terminal.hideCursor();
-		// Focus reporting: terminal sends ESC[I / ESC[O when the window/pane gains
-		// or loses focus, so the fake cursor can hollow out while unfocused.
 		setTerminalFocused(true);
 		this.terminal.write(ENABLE_FOCUS_REPORTING);
 		if (this.terminalColorSchemeNotificationsEnabled) {
@@ -1050,9 +957,10 @@ export abstract class TuiBase extends Container implements TUI {
 		this.terminal.write(DISABLE_FOCUS_REPORTING);
 		if (this.hardwareBlockCursorActive) {
 			this.hardwareBlockCursorActive = false;
-			this.terminal.write("\x1b[0 q"); // DECSCUSR 0: terminal default
+			this.terminal.write("\x1b[0 q");
 		}
 		setTerminalFocused(true);
+		setHardwareHollowCursor(false);
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
@@ -1060,7 +968,6 @@ export abstract class TuiBase extends Container implements TUI {
 		this.terminal.showCursor();
 		this.terminal.stop();
 		this.afterTerminalStop(options);
-		this.perfFlush();
 	}
 
 	renderNow(force = false): void {
@@ -1068,7 +975,8 @@ export abstract class TuiBase extends Container implements TUI {
 		this.renderRequested = false;
 		this.cancelRenderTimer();
 		this.lastRenderAt = performance.now();
-		this.runRenderFrame();
+		this.beginRenderFrame();
+		this.doRender();
 	}
 
 	requestRender(force = false): void {
@@ -1095,7 +1003,8 @@ export abstract class TuiBase extends Container implements TUI {
 			this.cancelRenderTimer();
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
-			this.runRenderFrame();
+			this.beginRenderFrame();
+			this.doRender();
 		});
 	}
 
@@ -1118,21 +1027,25 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
-			this.runRenderFrame();
+			this.beginRenderFrame();
+			this.doRender();
 			if (this.renderRequested) {
 				this.scheduleRender();
 			}
 		}, delay);
 	}
 
+	private beginRenderFrame(): void {
+		setHardwareHollowCursor(this.positionsHardwareCursor);
+		beginCursorFrame();
+	}
+
 	private handleTerminalInput(data: string): void {
-		// Track window focus before listeners run (alt screen also uses ESC[O to
-		// clear in-flight selections), and swallow the event afterwards.
 		const isFocusEvent = data === FOCUS_IN || data === FOCUS_OUT;
 		if (isFocusEvent) {
 			setTerminalFocused(data === FOCUS_IN);
-			// Only repaint when something on screen actually depends on focus.
 			if (hasRenderedCursor()) this.requestRender();
+			return;
 		}
 		if (this.consumeOsc11BackgroundResponse(data)) {
 			return;
@@ -1156,11 +1069,6 @@ export abstract class TuiBase extends Container implements TUI {
 				return;
 			}
 			data = current;
-		}
-
-		// Focus events are not key input - never forward them to components.
-		if (isFocusEvent) {
-			return;
 		}
 
 		// Consume terminal cell size responses without blocking unrelated input.
@@ -1412,11 +1320,16 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
 	protected compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
-		if (this.overlayStack.length === 0) return lines;
+		if (this.overlayStack.length === 0) {
+			this.renderedOverlayLayouts = [];
+			return lines;
+		}
 		const result = [...lines];
 
+		for (const entry of this.overlayStack) entry.bounds = undefined;
+
 		// Pre-render all visible overlays and calculate positions
-		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
+		const rendered: { entry: OverlayStackEntry; overlayLines: string[]; row: number; col: number; w: number }[] = [];
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1438,10 +1351,18 @@ export abstract class TuiBase extends Container implements TUI {
 
 			// Get final row/col with actual overlay height
 			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
+			entry.bounds = { row, col, width, height: overlayLines.length };
 
-			rendered.push({ overlayLines, row, col, w: width });
+			rendered.push({ entry, overlayLines, row, col, w: width });
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}
+		this.renderedOverlayLayouts = rendered.map(({ entry, row, col, w, overlayLines }) => ({
+			entry,
+			row,
+			col,
+			width: w,
+			height: overlayLines.length,
+		}));
 
 		// Pad to at least terminal height so overlays have screen-relative positions.
 		// Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing

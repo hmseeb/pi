@@ -2,20 +2,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
-	CURSOR_OUTLINE_OFF,
-	CURSOR_OUTLINE_ON,
-	type CursorRenderer,
 	type EditorTheme,
 	getCapabilities,
 	type MarkdownTheme,
 	type RgbColor,
 	type SelectListTheme,
 	type SettingsListTheme,
-	setCursorRenderer,
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
-import { type Static, Type } from "typebox";
-import { Compile } from "typebox/compile";
 import { getCustomThemesDir, getThemesDir } from "../../../config.ts";
 import type { SourceInfo } from "../../../core/source-info.ts";
 import { closeWatcher, watchWithErrorHandler } from "../../../utils/fs-watch.ts";
@@ -26,99 +20,26 @@ import { stripBom } from "../../../utils/text.ts";
 // Types & Schema
 // ============================================================================
 
-const ColorValueSchema = Type.Union([
-	Type.String(), // hex "#ff0000", var ref "primary", or empty ""
-	Type.Integer({ minimum: 0, maximum: 255 }), // 256-color index
-]);
+/** The schema that validates this shape lives in `theme-json.ts`; importing the type is free. */
+import type { ThemeColorValue as ColorValue, ValidatedThemeJson as ThemeJson } from "./theme-json.ts";
 
-type ColorValue = Static<typeof ColorValueSchema>;
+export type { ValidatedThemeJson as ThemeJson } from "./theme-json.ts";
 
-const ThemeJsonSchema = Type.Object({
-	$schema: Type.Optional(Type.String()),
-	name: Type.String(),
-	vars: Type.Optional(Type.Record(Type.String(), ColorValueSchema)),
-	colors: Type.Object({
-		// Core UI (10 colors)
-		accent: ColorValueSchema,
-		// Text cursor (optional, defaults to accent)
-		cursor: Type.Optional(ColorValueSchema),
-		border: ColorValueSchema,
-		borderAccent: ColorValueSchema,
-		borderMuted: ColorValueSchema,
-		success: ColorValueSchema,
-		error: ColorValueSchema,
-		warning: ColorValueSchema,
-		muted: ColorValueSchema,
-		dim: ColorValueSchema,
-		text: ColorValueSchema,
-		thinkingText: ColorValueSchema,
-		// Backgrounds & Content Text (11 required, 3 optional)
-		selectedBg: ColorValueSchema,
-		scrollbarThumb: Type.Optional(ColorValueSchema),
-		searchMatchBg: Type.Optional(ColorValueSchema),
-		searchMatchText: Type.Optional(ColorValueSchema),
-		userMessageBg: ColorValueSchema,
-		userMessageText: ColorValueSchema,
-		customMessageBg: ColorValueSchema,
-		customMessageText: ColorValueSchema,
-		customMessageLabel: ColorValueSchema,
-		toolPendingBg: ColorValueSchema,
-		toolSuccessBg: ColorValueSchema,
-		toolErrorBg: ColorValueSchema,
-		toolTitle: ColorValueSchema,
-		toolOutput: ColorValueSchema,
-		// Markdown (10 colors)
-		mdHeading: ColorValueSchema,
-		mdLink: ColorValueSchema,
-		mdLinkUrl: ColorValueSchema,
-		mdCode: ColorValueSchema,
-		mdCodeBlock: ColorValueSchema,
-		mdCodeBlockBorder: ColorValueSchema,
-		mdQuote: ColorValueSchema,
-		mdQuoteBorder: ColorValueSchema,
-		mdHr: ColorValueSchema,
-		mdListBullet: ColorValueSchema,
-		// Tool Diffs (3 colors)
-		toolDiffAdded: ColorValueSchema,
-		toolDiffRemoved: ColorValueSchema,
-		toolDiffContext: ColorValueSchema,
-		// Syntax Highlighting (9 colors)
-		syntaxComment: ColorValueSchema,
-		syntaxKeyword: ColorValueSchema,
-		syntaxFunction: ColorValueSchema,
-		syntaxVariable: ColorValueSchema,
-		syntaxString: ColorValueSchema,
-		syntaxNumber: ColorValueSchema,
-		syntaxType: ColorValueSchema,
-		syntaxOperator: ColorValueSchema,
-		syntaxPunctuation: ColorValueSchema,
-		// Thinking Level Borders (6 colors)
-		thinkingOff: ColorValueSchema,
-		thinkingMinimal: ColorValueSchema,
-		thinkingLow: ColorValueSchema,
-		thinkingMedium: ColorValueSchema,
-		thinkingHigh: ColorValueSchema,
-		thinkingXhigh: ColorValueSchema,
-		thinkingMax: Type.Optional(ColorValueSchema),
-		// Bash Mode (1 color)
-		bashMode: ColorValueSchema,
-	}),
-	export: Type.Optional(
-		Type.Object({
-			pageBg: Type.Optional(ColorValueSchema),
-			cardBg: Type.Optional(ColorValueSchema),
-			infoBg: Type.Optional(ColorValueSchema),
-		}),
-	),
-});
+export type ThemeJsonValidator = (label: string, json: unknown) => ThemeJson;
 
-type ThemeJson = Static<typeof ThemeJsonSchema>;
+let themeJsonValidator: ThemeJsonValidator | undefined;
 
-const validateThemeJson = Compile(ThemeJsonSchema);
+/**
+ * Install full theme validation. Without it, documents are accepted as-is, which is what built-in
+ * themes already do: validating user-authored JSON needs typebox, and a presentation that only uses
+ * built-in themes should not pay ~17 MB of module graph for it.
+ */
+export function setThemeJsonValidator(validator: ThemeJsonValidator): void {
+	themeJsonValidator = validator;
+}
 
 export type ThemeColor =
 	| "accent"
-	| "cursor"
 	| "border"
 	| "borderAccent"
 	| "borderMuted"
@@ -129,6 +50,8 @@ export type ThemeColor =
 	| "dim"
 	| "text"
 	| "thinkingText"
+	| "scrollbarTrack"
+	| "scrollbarThumb"
 	| "searchMatchText"
 	| "userMessageText"
 	| "customMessageText"
@@ -168,7 +91,6 @@ export type ThemeColor =
 
 export type ThemeBg =
 	| "selectedBg"
-	| "scrollbarThumb"
 	| "searchMatchBg"
 	| "userMessageBg"
 	| "customMessageBg"
@@ -176,8 +98,8 @@ export type ThemeBg =
 	| "toolSuccessBg"
 	| "toolErrorBg";
 
-type OptionalThemeColor = "thinkingMax" | "searchMatchText" | "cursor";
-type OptionalThemeBg = "scrollbarThumb" | "searchMatchBg";
+type OptionalThemeColor = "scrollbarTrack" | "scrollbarThumb" | "thinkingMax" | "searchMatchText";
+type OptionalThemeBg = "searchMatchBg";
 
 type ColorMode = "truecolor" | "256color";
 
@@ -337,17 +259,17 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 }
 
 function withThemeColorFallbacks(colors: ThemeJson["colors"]): ThemeJson["colors"] & {
-	thinkingMax: ColorValue;
+	scrollbarTrack: ColorValue;
 	scrollbarThumb: ColorValue;
+	thinkingMax: ColorValue;
 	searchMatchBg: ColorValue;
 	searchMatchText: ColorValue;
-	cursor: ColorValue;
 } {
 	return {
 		...colors,
-		cursor: colors.cursor ?? colors.accent,
+		scrollbarTrack: colors.scrollbarTrack ?? colors.muted,
+		scrollbarThumb: colors.scrollbarThumb ?? colors.text,
 		thinkingMax: colors.thinkingMax ?? colors.thinkingXhigh,
-		scrollbarThumb: colors.scrollbarThumb ?? colors.selectedBg,
 		searchMatchBg: colors.searchMatchBg ?? colors.selectedBg,
 		searchMatchText: colors.searchMatchText ?? colors.text,
 	};
@@ -380,7 +302,8 @@ export class Theme {
 		this.fgColors = new Map();
 		const colors = {
 			...fgColors,
-			cursor: fgColors.cursor ?? fgColors.accent,
+			scrollbarTrack: fgColors.scrollbarTrack ?? fgColors.muted,
+			scrollbarThumb: fgColors.scrollbarThumb ?? fgColors.text,
 			thinkingMax: fgColors.thinkingMax ?? fgColors.thinkingXhigh,
 			searchMatchText: fgColors.searchMatchText ?? fgColors.text,
 		};
@@ -390,7 +313,6 @@ export class Theme {
 		this.bgColors = new Map();
 		const backgrounds = {
 			...bgColors,
-			scrollbarThumb: bgColors.scrollbarThumb ?? bgColors.selectedBg,
 			searchMatchBg: bgColors.searchMatchBg ?? bgColors.selectedBg,
 		};
 		for (const [key, value] of Object.entries(backgrounds) as [ThemeBg, string | number][]) {
@@ -564,44 +486,11 @@ function assertThemeNameIsValid(name: string): void {
 }
 
 function parseThemeJson(label: string, json: unknown): ThemeJson {
-	if (!validateThemeJson.Check(json)) {
-		const errors = Array.from(validateThemeJson.Errors(json));
-		const missingColors = new Set<string>();
-		const otherErrors: string[] = [];
-
-		for (const error of errors) {
-			if (error.keyword === "required" && error.instancePath === "/colors") {
-				const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
-				for (const requiredProperty of requiredProperties ?? []) {
-					missingColors.add(requiredProperty);
-				}
-				continue;
-			}
-
-			const path = error.instancePath || "/";
-			otherErrors.push(`  - ${path}: ${error.message}`);
-		}
-
-		let errorMessage = `Invalid theme "${label}":\n`;
-		if (missingColors.size > 0) {
-			errorMessage += "\nMissing required color tokens:\n";
-			errorMessage += Array.from(missingColors)
-				.sort()
-				.map((color) => `  - ${color}`)
-				.join("\n");
-			errorMessage += '\n\nPlease add these colors to your theme\'s "colors" object.';
-			errorMessage += "\nSee the built-in themes (dark.json, light.json) for reference values.";
-		}
-		if (otherErrors.length > 0) {
-			errorMessage += `\n\nOther errors:\n${otherErrors.join("\n")}`;
-		}
-
-		throw new Error(errorMessage);
+	if (themeJsonValidator) return themeJsonValidator(label, json);
+	if (typeof json !== "object" || json === null || !("colors" in json)) {
+		throw new Error(`Invalid theme "${label}": expected an object with a "colors" map.`);
 	}
-
-	const themeJson = json as ThemeJson;
-	assertThemeNameIsValid(themeJson.name);
-	return themeJson;
+	return json as ThemeJson;
 }
 
 function parseThemeJsonContent(label: string, content: string): ThemeJson {
@@ -643,7 +532,6 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
 	const bgColorKeys: Set<string> = new Set([
 		"selectedBg",
-		"scrollbarThumb",
 		"searchMatchBg",
 		"userMessageBg",
 		"customMessageBg",
@@ -865,25 +753,6 @@ export const theme: Theme = new Proxy({} as Theme, {
 function setGlobalTheme(t: Theme): void {
 	(globalThis as Record<symbol, Theme>)[THEME_KEY] = t;
 	(globalThis as Record<symbol, Theme>)[THEME_KEY_OLD] = t;
-	setCursorRenderer(createCursorRenderer(t));
-}
-
-/**
- * Cursor style for the software fallback where the real terminal cursor cannot
- * be parked on the caret. Hardware-capable TUIs use the terminal's own blinking
- * block / unfocused full-cell hollow block instead.
- */
-function createCursorRenderer(t: Theme): CursorRenderer {
-	let ansi: string;
-	try {
-		ansi = t.getFgAnsi("cursor");
-	} catch {
-		ansi = t.getFgAnsi("accent");
-	}
-	return (grapheme: string, focused: boolean) =>
-		focused
-			? `${ansi}\x1b[7m${grapheme}\x1b[27m\x1b[39m`
-			: `${ansi}${CURSOR_OUTLINE_ON}${grapheme}${CURSOR_OUTLINE_OFF}\x1b[39m`;
 }
 
 let currentThemeName: string | undefined;
@@ -1351,8 +1220,6 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		selectList: getSelectListTheme(),
-		markerColor: (text: string) => theme.fg("accent", text),
-		markerInvalidColor: (text: string) => theme.fg("error", text),
 	};
 }
 

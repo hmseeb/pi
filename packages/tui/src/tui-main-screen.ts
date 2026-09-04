@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
 import { type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
@@ -122,8 +123,6 @@ export interface TuiMainScreenRenderState {
 /** TUI implementation that renders into the terminal's main screen and scrollback. */
 export class TuiMainScreen extends TuiBase implements TUI {
 	readonly mode = "regular" as const;
-	// Main screen parks the real terminal cursor on CURSOR_MARKER every render,
-	// so an unfocused terminal can draw its own hollow cursor there.
 	protected override readonly positionsHardwareCursor = true;
 	private previousLines: string[] = [];
 	private previousKittyImageIds = new Set<number>();
@@ -264,7 +263,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Render all components to get new lines
 		let newLines = this.render(width);
-		this.perfNoteLineCount(newLines.length);
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
@@ -279,10 +277,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
-			const output = new BoundedTerminalWriter((data) => {
-				this.perfNoteBytes(data);
-				this.terminal.write(data);
-			});
+			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 			output.append("\x1b[?2026h"); // Begin synchronized output
 			if (clear) {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
@@ -324,15 +319,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.previousHeight = height;
 		};
 
-		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
+		const redrawLogDirectory = process.env.PI_TUI_DEBUG_REDRAW === "1" ? this.logDirectory : undefined;
 		const logRedraw = (reason: string): void => {
-			if (this.perfEnabled) {
-				this.perfWrite(
-					`FULL_REDRAW reason="${reason}" prevLines=${this.previousLines.length} newLines=${newLines.length} height=${height}`,
-				);
-			}
-			if (!debugRedraw) return;
-			const logPath = path.join(this.logDirectory, "pi-debug.log");
+			if (redrawLogDirectory === undefined) return;
+			const logPath = path.join(redrawLogDirectory, "pi-tui-debug.log");
 			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
 			fs.mkdirSync(path.dirname(logPath), { recursive: true });
 			fs.appendFileSync(logPath, msg);
@@ -363,7 +353,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Content shrunk below the working area and no overlays - re-render to clear empty rows
 		// (overlays need the padding, so only do this when no overlays are active)
-		// Configurable via setClearOnShrink() or PI_CLEAR_ON_SHRINK=0 env var
+		// Configurable via setClearOnShrink()
 		if (this.getClearOnShrink() && newLines.length < this.maxLinesRendered && !this.hasOverlayEntries) {
 			logRedraw(`clearOnShrink (maxLinesRendered=${this.maxLinesRendered})`);
 			fullRender(true);
@@ -467,10 +457,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Render from first changed line to end
 		// Keep updates wrapped in synchronized output while writing bounded chunks.
-		const output = new BoundedTerminalWriter((data) => {
-			this.perfNoteBytes(data);
-			this.terminal.write(data);
-		});
+		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 		output.append("\x1b[?2026h"); // Begin synchronized output
 		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
 		const prevViewportBottom = prevViewportTop + height - 1;
@@ -530,7 +517,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			output.append("\x1b[2K"); // Clear current line
 			if (!isImage && visibleWidth(line) > width) {
 				// Log all lines to crash file for debugging
-				const crashLogPath = path.join(this.logDirectory, "pi-crash.log");
+				const crashLogPath = path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log");
 				const crashData = [
 					`Crash at ${new Date().toISOString()}`,
 					`Terminal width: ${width}`,
@@ -655,15 +642,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Move to absolute column (1-indexed)
 		buffer += `\x1b[${targetCol + 1}G`;
 
-		const visible = this.getShowHardwareCursor();
-		if (visible) buffer += this.activateHardwareBlockCursor();
-
 		if (buffer) {
 			this.terminal.write(buffer);
 		}
 
 		this.hardwareCursorRow = targetRow;
-		if (visible) {
+		if (this.getShowHardwareCursor()) {
+			const cursorStyle = this.activateHardwareBlockCursor();
+			if (cursorStyle) this.terminal.write(cursorStyle);
 			this.terminal.showCursor();
 		} else {
 			this.terminal.hideCursor();

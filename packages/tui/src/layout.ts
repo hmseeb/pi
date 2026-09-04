@@ -2,10 +2,16 @@ import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
-import { type Component, CURSOR_MARKER, compositeTuiLine, hasMouseHandler } from "./tui.ts";
-import { extractAnsiCode, getGraphemeCellRange, sliceByColumn, visibleWidth } from "./utils.ts";
+import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
+import {
+	extractAnsiCode,
+	getActiveBackgroundAnsi,
+	getGraphemeCellRange,
+	sliceByColumn,
+	visibleWidth,
+} from "./utils.ts";
 
-const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:;[^\x07\x1b]*)?(?:\x07|\x1b\\))+/;
+const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
 
 export interface LayoutRect {
 	x: number;
@@ -240,7 +246,13 @@ function layoutComponent(
 	return box;
 }
 
-function styleScrollbarCell(line: string, column: number, totalWidth: number, style: (text: string) => string): string {
+function replaceScrollbarCell(
+	line: string,
+	column: number,
+	totalWidth: number,
+	replacement: string,
+	preserveTargetBackground: boolean,
+): string {
 	if (isImageLine(line)) return line;
 
 	const graphemeRange = getGraphemeCellRange(line, column);
@@ -258,16 +270,20 @@ function styleScrollbarCell(line: string, column: number, totalWidth: number, st
 		targetPrefix += ansi.code;
 		targetIndex += ansi.length;
 	}
-	const targetText = target.slice(targetIndex) || " ".repeat(end - start);
 	const beforePadding = " ".repeat(Math.max(0, start - visibleWidth(before)));
-	return `${before}${beforePadding}${targetPrefix}${style(targetText)}${after}`;
+	const cellPaddingBefore = " ".repeat(Math.max(0, column - start));
+	const cellPaddingAfter = " ".repeat(Math.max(0, end - column - 1));
+	const targetStyle = `\x1b[0m\x1b]8;;\x07${preserveTargetBackground ? getActiveBackgroundAnsi(targetPrefix) : ""}`;
+	return `${before}${beforePadding}${targetStyle}${cellPaddingBefore}${replacement}${cellPaddingAfter}${after}`;
 }
 
-export function getScrollbarGeometry(box: LayoutBox): ScrollbarGeometry | undefined {
-	if (!box.scrollView?.isScrollbarVisible || box.rect.width <= 0 || box.rect.height <= 0) return undefined;
+export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false): ScrollbarGeometry | undefined {
+	if (!box.scrollView || box.rect.width <= 0 || box.rect.height <= 0) return undefined;
 
 	const contentHeight = box.children[0]?.rect.height ?? box.scrollContentLines?.length ?? 0;
 	const trackHeight = box.rect.height;
+	const canRevealHiddenAuto = includeHiddenAuto && box.scrollView.scrollbar === "auto" && contentHeight > trackHeight;
+	if (!box.scrollView.isScrollbarVisible && !canRevealHiddenAuto) return undefined;
 
 	const minThumbHeight = Math.min(2, trackHeight);
 	const thumbHeight = Math.max(
@@ -294,10 +310,20 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
 
-	for (let offset = 0; offset < geometry.thumbHeight; offset++) {
-		const row = geometry.thumbTop + offset;
+	for (let offset = 0; offset < geometry.trackHeight; offset++) {
+		const row = geometry.trackTop + offset;
 		if (row < box.clip.y || row >= box.clip.y + box.clip.height || row < 0 || row >= screen.length) continue;
-		screen[row] = styleScrollbarCell(screen[row] ?? "", geometry.column, totalWidth, box.scrollView.scrollbarStyle);
+		const isThumb = row >= geometry.thumbTop && row < geometry.thumbTop + geometry.thumbHeight;
+		const replacement = isThumb
+			? box.scrollView.scrollbarThumbStyle(box.scrollView.isScrollbarActive ? "█" : "┃")
+			: box.scrollView.scrollbarTrackStyle("│");
+		screen[row] = replaceScrollbarCell(
+			screen[row] ?? "",
+			geometry.column,
+			totalWidth,
+			replacement,
+			box.scrollView.scrollbar !== "always",
+		);
 	}
 }
 
@@ -381,37 +407,21 @@ export function renderLayoutFrame(
 	};
 }
 
-export function containsPoint(rect: LayoutRect, x: number, y: number): boolean {
+function containsPoint(rect: LayoutRect, x: number, y: number): boolean {
 	return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
 }
 
-/**
- * Collect visible boxes at (x, y) whose components handle mouse input, ordered
- * innermost-first.
- *
- * Callers try each in turn and stop at the first that consumes the event. A
- * container may report a handler yet decline the event (nothing interactive on
- * that row), so a single "best" box is not enough. `clip` is tested for
- * ancestors so a component scrolled out of view is never targeted; deeper and
- * later-painted boxes sort first because they are drawn on top.
- */
-export function getMouseTargetsAt(frame: LayoutFrame, x: number, y: number): LayoutBox[] {
-	const matches: Array<{ box: LayoutBox; depth: number; order: number }> = [];
-	let order = 0;
+/** Return the visual hit path from the deepest component to the layout root. */
+export function getLayoutBoxesAt(frame: LayoutFrame, x: number, y: number): LayoutBox[] {
+	const result: Array<{ box: LayoutBox; depth: number }> = [];
 	const visit = (box: LayoutBox, depth: number): void => {
 		if (!containsPoint(box.clip, x, y)) return;
-		if (hasMouseHandler(box.component) && containsPoint(box.rect, x, y)) {
-			matches.push({ box, depth, order: order++ });
-		}
+		result.push({ box, depth });
 		for (const child of box.children) visit(child, depth + 1);
 	};
 	visit(frame.root, 0);
-	matches.sort((a, b) => {
-		if (a.box.layer !== b.box.layer) return b.box.layer - a.box.layer;
-		if (a.depth !== b.depth) return b.depth - a.depth;
-		return b.order - a.order;
-	});
-	return matches.map((entry) => entry.box);
+	result.sort((a, b) => b.box.layer - a.box.layer || b.depth - a.depth);
+	return result.map(({ box }) => box);
 }
 
 export function getScrollViewBox(frame: LayoutFrame, scrollView: ScrollView): LayoutBox | undefined {

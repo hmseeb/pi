@@ -3,7 +3,14 @@ import { renderCursor } from "../cursor.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
-import { type Component, type ComponentMouseEvent, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
+import {
+	type Component,
+	CURSOR_MARKER,
+	type Focusable,
+	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
 	cjkBreakRegex,
@@ -19,10 +26,8 @@ import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "
 const graphemeSegmenter = getGraphemeSegmenter();
 const wordSegmenter = getWordSegmenter();
 
-/** Marker kinds that collapse hidden content behind a short atomic label. */
+/** Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`. */
 const MARKER_KINDS = ["paste", "Image"] as const;
-
-/** Regex matching markers like `[paste #1 +123 lines]`, `[paste #2 1234 chars]`, `[Image #1]`. */
 const PASTE_MARKER_REGEX = /\[(paste|Image) #(\d+)( [^\]]*)?\]/g;
 
 /** Non-global version for single-segment testing. */
@@ -232,9 +237,7 @@ interface LayoutLine {
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
-	/** Colors collapsed markers such as `[paste #1 +20 lines]` and `[Image #1]`. */
 	markerColor?: (str: string) => string;
-	/** Colors marker-shaped text with no backing content (e.g. hand-typed `[Image #9]`). */
 	markerInvalidColor?: (str: string) => string;
 }
 
@@ -266,6 +269,13 @@ function buildDebouncePattern(triggerCharacters: string[]): RegExp {
 
 function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, width: number): string {
 	const availableWidth = Math.max(0, width);
+	const label = ` ${direction} ${hiddenLineCount} more `;
+	const labelWidth = visibleWidth(label);
+	if (labelWidth + 2 <= availableWidth) {
+		const leftWidth = Math.floor((availableWidth - labelWidth) / 2);
+		return "─".repeat(leftWidth) + label + "─".repeat(availableWidth - leftWidth - labelWidth);
+	}
+
 	const indicator = `─── ${direction} ${hiddenLineCount} more `;
 	const remaining = availableWidth - visibleWidth(indicator);
 	if (remaining >= 0) return indicator + "─".repeat(remaining);
@@ -275,13 +285,10 @@ function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, w
 	return sliceByColumn(indicator, 0, indicatorWidth, true) + ellipsis;
 }
 
-/** Draws a label into a horizontal border, e.g. `─── shell mode ─────`. */
 function createLabelBorder(label: string, width: number): string {
-	const availableWidth = Math.max(0, width);
 	const indicator = `─── ${label} `;
-	const remaining = availableWidth - visibleWidth(indicator);
-	if (remaining >= 0) return indicator + "─".repeat(remaining);
-	return sliceByColumn(indicator, 0, availableWidth, true);
+	const remaining = Math.max(0, width) - visibleWidth(indicator);
+	return remaining >= 0 ? indicator + "─".repeat(remaining) : sliceByColumn(indicator, 0, Math.max(0, width), true);
 }
 
 export class Editor implements Component, Focusable {
@@ -298,34 +305,20 @@ export class Editor implements Component, Focusable {
 	private theme: EditorTheme;
 	private paddingX: number = 0;
 
-	// Store last render width for cursor navigation
+	// Store last render geometry for cursor navigation and mouse hit-testing.
 	private lastWidth: number = 80;
-
-	// Geometry of the last render, used to map mouse coordinates back to text
-	// positions. Text rows start after the top border, hence the +1 in handleMouse.
-	private lastEffectivePaddingX: number = 0;
-	private lastVisibleLineCount: number = 0;
-	// Width this editor was last asked to render at. Compared against the width
-	// of the box that actually received the click to recover a decorator's
-	// horizontal origin shift (see getContentOriginX).
-	private lastRenderWidth: number = 0;
+	private lastRenderWidth: number = 80;
+	private renderedVisibleLineCount = 1;
+	private renderedAutocompleteHeight = 0;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
-
-	// Optional color applied to collapsed paste/image markers
 	public markerColor?: (str: string) => string;
-
-	// Optional color applied to marker-shaped text with no backing content
 	public markerInvalidColor?: (str: string) => string;
-
-	// Optional sticky foreground ANSI applied to all editor text (e.g. shell mode)
 	public textAnsi?: string;
-
-	// Optional label drawn into the top border (e.g. "shell mode")
 	public borderLabel?: string;
 
 	// Autocomplete support
@@ -519,10 +512,22 @@ export class Editor implements Component, Focusable {
 		// No cached state to invalidate currently
 	}
 
+	protected renderTopBorder(width: number, hiddenLineCount: number): string {
+		const border =
+			hiddenLineCount > 0
+				? createScrollBorder("↑", hiddenLineCount, width)
+				: this.borderLabel
+					? createLabelBorder(this.borderLabel, width)
+					: "─".repeat(width);
+		return this.borderColor(border);
+	}
+
+	protected renderBottomBorder(width: number, hiddenLineCount: number): string {
+		const border = hiddenLineCount > 0 ? createScrollBorder("↓", hiddenLineCount, width) : "─".repeat(width);
+		return this.borderColor(border);
+	}
+
 	render(width: number): string[] {
-		// Recorded for mouse hit-testing: a subclass that decorates the rendered
-		// lines calls super.render() with a reduced width, and the difference from
-		// the clicked box's width is the horizontal origin shift.
 		this.lastRenderWidth = width;
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
@@ -534,8 +539,6 @@ export class Editor implements Component, Focusable {
 
 		// Store for cursor navigation (must match wrapping width)
 		this.lastWidth = layoutWidth;
-
-		const horizontal = this.borderColor("─");
 
 		// Layout the text
 		const layoutLines = this.layoutText(layoutWidth);
@@ -561,24 +564,14 @@ export class Editor implements Component, Focusable {
 
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
-
-		// Record geometry for mouse hit-testing (see handleMouse)
-		this.lastEffectivePaddingX = paddingX;
-		this.lastVisibleLineCount = visibleLines.length;
+		this.renderedVisibleLineCount = visibleLines.length;
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
 		// Render top border (with scroll indicator if scrolled down)
-		if (this.scrollOffset > 0) {
-			const border = createScrollBorder("↑", this.scrollOffset, width);
-			result.push(this.borderColor(border));
-		} else if (this.borderLabel) {
-			result.push(this.borderColor(createLabelBorder(this.borderLabel, width)));
-		} else {
-			result.push(horizontal.repeat(width));
-		}
+		result.push(this.renderTopBorder(width, this.scrollOffset));
 
 		// Render each visible layout line
 		// Emit hardware cursor marker when focused so TUI can position the
@@ -620,23 +613,12 @@ export class Editor implements Component, Focusable {
 				}
 			}
 
-			// Colorize collapsed markers. Safe here because lineVisibleWidth was
-			// measured before, and ANSI adds zero visible width. A marker under the
-			// cursor is already ANSI-split and simply stays uncolored.
 			if (this.markerColor || this.markerInvalidColor) {
-				const paint = this.markerColor;
-				const paintInvalid = this.markerInvalidColor;
 				displayText = displayText.replace(PASTE_MARKER_REGEX, (marker, _kind, id) => {
-					// Hand-typed markers have no entry in `pastes` and expand to nothing,
-					// so flag them instead of dressing them up as a real attachment.
-					const color = this.pastes.has(Number.parseInt(id, 10)) ? paint : paintInvalid;
+					const color = this.pastes.has(Number.parseInt(id, 10)) ? this.markerColor : this.markerInvalidColor;
 					return color ? color(marker) : marker;
 				});
 			}
-
-			// Sticky mode color. Re-applying it after every inner foreground reset
-			// lets marker and cursor colors nest without losing the mode color for
-			// the rest of the line.
 			if (this.textAnsi) {
 				const ansi = this.textAnsi;
 				displayText = `${ansi}${displayText.replaceAll("\x1b[39m", ansi)}\x1b[39m`;
@@ -652,16 +634,13 @@ export class Editor implements Component, Focusable {
 
 		// Render bottom border (with scroll indicator if more content below)
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
-		if (linesBelow > 0) {
-			const border = createScrollBorder("↓", linesBelow, width);
-			result.push(this.borderColor(border));
-		} else {
-			result.push(horizontal.repeat(width));
-		}
+		result.push(this.renderBottomBorder(width, linesBelow));
 
 		// Add autocomplete list if active
+		this.renderedAutocompleteHeight = 0;
 		if (this.autocompleteState && this.autocompleteList) {
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
+			this.renderedAutocompleteHeight = autocompleteResult.length;
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
@@ -672,116 +651,79 @@ export class Editor implements Component, Focusable {
 		return result;
 	}
 
-	/**
-	 * Horizontal offset, in columns, between the clicked layout box and this
-	 * editor's own content.
-	 *
-	 * A subclass may decorate the rendered lines by prepending columns — the
-	 * shipped example is a prompt icon (`❯ `) added by an extension — and does so
-	 * by calling `super.render()` with a reduced width and re-padding each line.
-	 * The base editor is never told about those columns, so a click arrives
-	 * already including them and the caret lands too far right by exactly the
-	 * prefix width.
-	 *
-	 * The shift is recovered from the widths: `boxWidth` is what the layout gave
-	 * the component, `lastRenderWidth` is what this editor was actually asked to
-	 * render at. The difference is attributed entirely to the left, which is what
-	 * a prefix decorator does — it reserves the columns up front and pads each
-	 * content row on the left only. A subclass that instead splits the reserved
-	 * columns across both sides should override this.
-	 */
 	protected getContentOriginX(boxWidth: number): number {
 		if (!Number.isFinite(boxWidth) || this.lastRenderWidth <= 0) return 0;
 		return Math.max(0, boxWidth - this.lastRenderWidth);
 	}
 
-	/**
-	 * Move the caret to a clicked position.
-	 *
-	 * Coordinates are box-local. The rendered box is laid out as:
-	 *   row 0            top border
-	 *   rows 1..N        visible text (layout lines from scrollOffset)
-	 *   row N+1          bottom border
-	 *   rows N+2..       autocomplete dropdown, when open
-	 * Only the text rows are claimed; everything else is left to selection so
-	 * dragging across a border still selects.
-	 */
-	handleMouse(event: ComponentMouseEvent): boolean {
-		if (event.action !== "press" || event.button !== 0) return false;
-
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
+		if (
+			this.autocompleteState &&
+			this.autocompleteList &&
+			event.y >= autocompleteStartRow &&
+			event.y < autocompleteStartRow + this.renderedAutocompleteHeight
+		) {
+			const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
+			const paddingX = Math.min(this.paddingX, maxPadding);
+			const contentWidth = Math.max(1, event.width - paddingX * 2);
+			const result = this.autocompleteList.handleMouse?.({
+				...event,
+				x: event.x - paddingX,
+				y: event.y - autocompleteStartRow,
+				width: contentWidth,
+				height: this.renderedAutocompleteHeight,
+			});
+			return result ? { ...result, focus: true } : undefined;
+		}
+		if (event.type !== "click" || event.button !== "left") return undefined;
 		const textRow = event.y - 1;
-		if (textRow < 0 || textRow >= this.lastVisibleLineCount) return false;
-
+		if (textRow < 0 || textRow >= this.renderedVisibleLineCount) return undefined;
 		const visualLines = this.buildVisualLineMap(this.lastWidth);
 		const visualIndex = this.scrollOffset + textRow;
-		const vl = visualLines[visualIndex];
-		if (!vl) return false;
-
-		const logicalLine = this.state.lines[vl.logicalLine] || "";
-		const segmentText = logicalLine.slice(vl.startCol, vl.startCol + vl.length);
-
-		// The last visual segment of a logical line may hold the caret one past its
-		// end; continuation segments may not, mirroring findVisualLineAt().
-		const isLastSegmentOfLine =
-			visualIndex === visualLines.length - 1 || visualLines[visualIndex + 1]?.logicalLine !== vl.logicalLine;
-
-		const targetDisplayCol = event.x - this.getContentOriginX(event.width) - this.lastEffectivePaddingX;
-		const offset = this.displayColumnToOffset(segmentText, targetDisplayCol, isLastSegmentOfLine);
-
-		this.state.cursorLine = vl.logicalLine;
-		this.setCursorCol(Math.min(vl.startCol + offset, logicalLine.length));
+		const visualLine = visualLines[visualIndex];
+		if (!visualLine) return undefined;
+		const logicalLine = this.state.lines[visualLine.logicalLine] ?? "";
+		const segmentText = logicalLine.slice(visualLine.startCol, visualLine.startCol + visualLine.length);
+		const isLastSegment =
+			visualIndex === visualLines.length - 1 || visualLines[visualIndex + 1]?.logicalLine !== visualLine.logicalLine;
+		const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
+		const paddingX = Math.min(this.paddingX, maxPadding);
+		const targetColumn = event.x - this.getContentOriginX(event.width) - paddingX;
+		const offset = this.displayColumnToOffset(segmentText, targetColumn, isLastSegment);
+		this.state.cursorLine = visualLine.logicalLine;
+		this.setCursorCol(Math.min(visualLine.startCol + offset, logicalLine.length));
 		this.snapCursorToSegmentStart(logicalLine);
-
-		if (this.autocompleteState) this.updateAutocomplete();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
+		if (this.autocompleteState) this.updateAutocomplete();
 		this.tui.requestRender();
-		return true;
+		return { handled: true, focus: true };
 	}
 
-	/**
-	 * Map a display column within a visual line to a string offset in that line.
-	 *
-	 * Walks grapheme clusters accumulating display width so wide characters (CJK,
-	 * emoji) and zero-width sequences always resolve to a real cluster boundary.
-	 * A click landing on the right half of a wide grapheme snaps past it, which is
-	 * what makes clicking "just after" a character feel correct. Clicks beyond the
-	 * end clamp to the end of the segment.
-	 */
-	private displayColumnToOffset(segmentText: string, targetDisplayCol: number, allowEnd: boolean): number {
-		if (targetDisplayCol <= 0) return 0;
-
+	private displayColumnToOffset(segmentText: string, targetColumn: number, allowEnd: boolean): number {
+		if (targetColumn <= 0) return 0;
 		const graphemes = [...this.segment(segmentText, "grapheme")];
-		let displayCol = 0;
+		let column = 0;
 		for (const grapheme of graphemes) {
 			const width = visibleWidth(grapheme.segment);
-			if (targetDisplayCol < displayCol + width) {
-				// Inside this cluster: pick the nearer of its two boundaries.
-				const landsOnSecondHalf = width > 1 && targetDisplayCol - displayCol >= Math.ceil(width / 2);
-				if (!landsOnSecondHalf) return grapheme.index;
-				const end = grapheme.index + grapheme.segment.length;
-				return allowEnd ? end : Math.min(end, Math.max(0, segmentText.length - 1));
+			if (targetColumn < column + width) {
+				const secondHalf = width > 1 && targetColumn - column >= Math.ceil(width / 2);
+				if (!secondHalf) return grapheme.index;
+				const graphemeEnd = grapheme.index + grapheme.segment.length;
+				return allowEnd ? graphemeEnd : Math.min(graphemeEnd, Math.max(0, segmentText.length - 1));
 			}
-			displayCol += width;
+			column += width;
 		}
-
-		// Past the end of the rendered text.
 		if (allowEnd) return segmentText.length;
-		const lastGrapheme = graphemes[graphemes.length - 1];
-		return lastGrapheme ? lastGrapheme.index : 0;
+		return graphemes.at(-1)?.index ?? 0;
 	}
 
-	/**
-	 * Keep the caret off the interior of an atomic segment such as a paste marker,
-	 * snapping back to its start so the whole marker stays highlighted. Mirrors the
-	 * snapping performed by moveToVisualLine().
-	 */
 	private snapCursorToSegmentStart(logicalLine: string): void {
-		for (const seg of this.segment(logicalLine, "grapheme")) {
-			if (seg.index > this.state.cursorCol) return;
-			if (seg.segment.length <= 1) continue;
-			if (this.state.cursorCol < seg.index + seg.segment.length) {
-				this.state.cursorCol = seg.index;
+		for (const segment of this.segment(logicalLine, "grapheme")) {
+			if (segment.index > this.state.cursorCol) return;
+			if (segment.segment.length > 1 && this.state.cursorCol < segment.index + segment.segment.length) {
+				this.state.cursorCol = segment.index;
 				return;
 			}
 		}
@@ -1234,19 +1176,13 @@ export class Editor implements Component, Focusable {
 		this.insertTextAtCursorInternal(text);
 	}
 
-	/**
-	 * Insert a collapsed marker (e.g. `[Image #1]`) that hides `content` from the
-	 * rendered prompt but expands back to it on submit / getExpandedText().
-	 * Used for clipboard image paths so the editor is not flooded with tmp paths.
-	 */
 	insertHiddenAtCursor(content: string, kind: string = "Image"): void {
 		if (!content) return;
 		this.cancelAutocomplete();
 		this.pushUndoSnapshot();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
-		this.pasteCounter++;
-		const id = this.pasteCounter;
+		const id = ++this.pasteCounter;
 		this.pastes.set(id, content);
 		this.insertTextAtCursorInternal(`[${kind} #${id}]`);
 	}
@@ -2350,7 +2286,25 @@ export class Editor implements Component, Focusable {
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
 		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
-		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		const list = new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		list.onSelect = (selected) => {
+			if (!this.autocompleteProvider) return;
+			this.pushUndoSnapshot();
+			this.lastAction = null;
+			const result = this.autocompleteProvider.applyCompletion(
+				this.state.lines,
+				this.state.cursorLine,
+				this.state.cursorCol,
+				selected,
+				this.autocompletePrefix,
+			);
+			this.state.lines = result.lines;
+			this.state.cursorLine = result.cursorLine;
+			this.setCursorCol(result.cursorCol);
+			this.cancelAutocomplete();
+			this.onChange?.(this.getText());
+		};
+		return list;
 	}
 
 	private tryTriggerAutocomplete(explicitTab: boolean = false): void {

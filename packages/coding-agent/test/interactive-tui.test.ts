@@ -1,9 +1,9 @@
 import type { Component, Terminal, TUI } from "@earendil-works/pi-tui";
-import { Container, hyperlink, isViewportTUI, Text } from "@earendil-works/pi-tui";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { Container, getKeybindings, isViewportTUI, ScrollView, setKeybindings, Text } from "@earendil-works/pi-tui";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";
-import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import {
 	createInteractiveTui,
 	createInteractiveTuiReference,
@@ -40,7 +40,6 @@ class RecordingTerminal extends VirtualTerminal implements Terminal {
 }
 
 describe("createInteractiveTui", () => {
-	beforeAll(() => initTheme("dark"));
 	it("selects the alternate-screen renderer only when requested", async () => {
 		const mainTerminal = new RecordingTerminal();
 		const mainTui = createInteractiveTui({
@@ -71,60 +70,33 @@ describe("createInteractiveTui", () => {
 		altTui.stop();
 	});
 
-	it("opens links on click but copies text on drag", async () => {
-		clipboardMocks.copyToClipboard.mockReset();
-		clipboardMocks.copyToClipboard.mockResolvedValue(undefined);
-		const terminal = new RecordingTerminal(20, 3);
-		const openUrl = vi.fn();
-		const onSelectionCopied = vi.fn(() => true);
-		const tui = createInteractiveTui({
-			tuiMode: "fullscreen",
-			showHardwareCursor: false,
-			logDirectory: "/tmp",
-			terminal,
-			openUrl,
-			onSelectionCopied,
-		});
-		tui.addChild(new Text(hyperlink("tool call", "pi-tool:call-1"), 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<0;1;1m");
-		await terminal.waitForRender();
-		expect(openUrl).toHaveBeenCalledExactlyOnceWith("pi-tool:call-1");
-
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<32;5;1M");
-		terminal.sendInput("\x1b[<0;5;1m");
-		await terminal.waitForRender();
-		expect(openUrl).toHaveBeenCalledTimes(1);
-		expect(clipboardMocks.copyToClipboard).toHaveBeenCalledExactlyOnceWith("tool");
-		expect(onSelectionCopied).toHaveBeenCalledExactlyOnceWith("tool");
-		expect(terminal.getViewport().some((line) => line.includes("Copied!"))).toBe(false);
-		tui.stop();
-	});
-
-	it("makes fullscreen tool calls individually clickable", () => {
-		const terminal = new RecordingTerminal(80, 24);
-		const tui = createInteractiveTui({
+	it("shows the configured jump-to-bottom shortcut while scrolled up", async () => {
+		initTheme("dark");
+		const previousKeybindings = getKeybindings();
+		setKeybindings(new KeybindingsManager({ "tui.altScreen.bottom": "ctrl+j" }));
+		const terminal = new RecordingTerminal(50, 4);
+		const ui = createInteractiveTui({
 			tuiMode: "fullscreen",
 			showHardwareCursor: false,
 			logDirectory: "/tmp",
 			terminal,
 		});
-		const first = new ToolExecutionComponent("read", "call/1", { path: "one.ts" }, {}, undefined, tui, "/tmp");
-		const second = new ToolExecutionComponent("read", "call/2", { path: "two.ts" }, {}, undefined, tui, "/tmp");
-		first.updateResult({ content: [{ type: "text", text: "first result" }], isError: false });
-		second.updateResult({ content: [{ type: "text", text: "second result" }], isError: false });
-
-		const collapsed = first.render(80).join("\n");
-		expect(collapsed).toContain("\x1b]8;;pi-tool:call%2F1");
-		expect(collapsed).not.toContain("first result");
-		expect(first.activateLink("pi-tool:call%2F1")).toBe(true);
-		expect(first.render(80).join("\n")).toContain("first result");
-		expect(second.render(80).join("\n")).not.toContain("second result");
-		expect(first.activateLink("pi-tool:call%2F2")).toBe(false);
+		ui.setLayoutRoot(
+			new ScrollView(new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0), {
+				follow: "end",
+				primary: true,
+			}),
+		);
+		ui.start();
+		try {
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[<64;1;1M");
+			await terminal.waitForRender();
+			expect(terminal.getViewport()[3]).toContain("↓ Jump to latest message · Ctrl+J");
+		} finally {
+			ui.stop();
+			setKeybindings(previousKeybindings);
+		}
 	});
 
 	it("replaces the renderer and restores the previous screen for resume-hint exits", async () => {
@@ -371,97 +343,76 @@ describe("InteractiveMode copy confirmation", () => {
 	});
 });
 
-type SelectionCopyStatusContext = {
-	activeStatusIndicator: { kind: "working"; setMessage: (message: string) => void } | undefined;
-	selectionCopyStatusTimer: NodeJS.Timeout | undefined;
-	workingMessage: string | undefined;
-	defaultWorkingMessage: string;
-	session: { isStreaming: boolean };
+type StatusEditor = {
+	embedWorkingStatus: boolean;
+	setWorkingStatusIndicator: (indicator: undefined) => void;
 };
 
 type ClearStatusContext = {
-	activeStatusIndicator: { kind: "working"; dispose: () => void } | undefined;
+	activeStatusIndicator: { kind: "working" | "retry"; dispose: () => void } | undefined;
+	activeWorkingIndicatorEmbedded: boolean;
 	statusContainer: Container;
+	defaultEditor: StatusEditor;
+	editor: Partial<StatusEditor>;
 	options: { tuiMode?: TuiMode };
 	ui: { getClearOnShrink: () => boolean };
 	idleStatus: Component;
+	setEditorWorkingStatusIndicator(indicator: undefined): boolean;
 };
 
 type InteractiveModePrototype = {
-	clearStatusIndicator(this: ClearStatusContext, kind?: "working"): void;
-	showSelectionCopiedStatus(this: SelectionCopyStatusContext): boolean;
+	clearStatusIndicator(this: ClearStatusContext, kind?: "working" | "retry"): void;
+	setEditorWorkingStatusIndicator(this: ClearStatusContext, indicator: undefined): boolean;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
 
-describe("selection copy status", () => {
-	it("temporarily replaces the working-row message", () => {
-		vi.useFakeTimers();
-		try {
-			const setMessage = vi.fn();
-			const context: SelectionCopyStatusContext = {
-				activeStatusIndicator: { kind: "working", setMessage },
-				selectionCopyStatusTimer: undefined,
-				workingMessage: undefined,
-				defaultWorkingMessage: "Working...",
-				session: { isStreaming: true },
-			};
-
-			expect(interactiveModePrototype.showSelectionCopiedStatus.call(context)).toBe(true);
-			expect(setMessage).toHaveBeenCalledExactlyOnceWith("Copied!");
-
-			vi.advanceTimersByTime(1000);
-			expect(setMessage).toHaveBeenLastCalledWith("Working...");
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("uses the status row while idle", () => {
-		vi.useFakeTimers();
-		try {
-			const context: any = {
-				activeStatusIndicator: undefined,
-				selectionCopyStatusTimer: undefined,
-				workingMessage: undefined,
-				defaultWorkingMessage: "Working...",
-				session: { isStreaming: false },
-				ui: { requestRender: vi.fn() },
-				showStatusIndicator(indicator: Component) {
-					this.activeStatusIndicator = indicator;
-				},
-				clearStatusIndicator: vi.fn(),
-			};
-
-			expect(interactiveModePrototype.showSelectionCopiedStatus.call(context)).toBe(true);
-			expect(context.activeStatusIndicator.render(80).join("\n")).toContain("Copied!");
-
-			vi.advanceTimersByTime(1000);
-			expect(context.clearStatusIndicator).toHaveBeenCalledExactlyOnceWith("working");
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-});
-
 describe("clear-on-shrink status spacing", () => {
-	it("reserves status height only on the main-screen renderer", () => {
+	it("does not reserve separate status height for the editor-border working indicator", () => {
+		const dispose = vi.fn();
+		const editor: StatusEditor = { embedWorkingStatus: true, setWorkingStatusIndicator: vi.fn() };
+		const context: ClearStatusContext = {
+			activeStatusIndicator: { kind: "working", dispose },
+			activeWorkingIndicatorEmbedded: true,
+			statusContainer: new Container(),
+			defaultEditor: editor,
+			editor,
+			options: { tuiMode: "regular" },
+			ui: { getClearOnShrink: () => true },
+			idleStatus: new Text("", 0, 0),
+			setEditorWorkingStatusIndicator: interactiveModePrototype.setEditorWorkingStatusIndicator,
+		};
+
+		interactiveModePrototype.clearStatusIndicator.call(context);
+
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(editor.setWorkingStatusIndicator).toHaveBeenCalledWith(undefined);
+		expect(context.statusContainer.children).toHaveLength(0);
+	});
+
+	it("uses the standalone row for a custom editor that has not opted in", () => {
 		for (const [tuiMode, expectedChildren] of [
 			["regular", 1],
 			["fullscreen", 0],
 		] as const) {
-			const dispose = vi.fn();
+			const defaultEditor: StatusEditor = { embedWorkingStatus: true, setWorkingStatusIndicator: vi.fn() };
+			const customEditor = { embedWorkingStatus: false, setWorkingStatusIndicator: vi.fn() };
 			const context: ClearStatusContext = {
-				activeStatusIndicator: { kind: "working", dispose },
+				activeStatusIndicator: { kind: "working", dispose: vi.fn() },
+				activeWorkingIndicatorEmbedded: false,
 				statusContainer: new Container(),
+				defaultEditor,
+				editor: customEditor,
 				options: { tuiMode },
 				ui: { getClearOnShrink: () => true },
 				idleStatus: new Text("", 0, 0),
+				setEditorWorkingStatusIndicator: interactiveModePrototype.setEditorWorkingStatusIndicator,
 			};
 
 			interactiveModePrototype.clearStatusIndicator.call(context);
 
-			expect(dispose).toHaveBeenCalledOnce();
+			expect(defaultEditor.setWorkingStatusIndicator).toHaveBeenCalledWith(undefined);
+			expect(customEditor.setWorkingStatusIndicator).not.toHaveBeenCalled();
 			expect(context.statusContainer.children).toHaveLength(expectedChildren);
 		}
 	});

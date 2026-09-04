@@ -18,6 +18,7 @@ export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts
 export { Input } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
 export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.ts";
+export { MouseRegion, type MouseRegionHandler } from "./components/mouse-region.ts";
 export {
 	ScrollView,
 	type ScrollViewOptions,
@@ -131,15 +132,14 @@ export {
 } from "./terminal-image.ts";
 export {
 	type Component,
-	type ComponentMouseEvent,
 	Container,
 	CURSOR_MARKER,
 	compositeTuiLine,
 	type Focusable,
-	hasMouseHandler,
 	isFocusable,
 	isViewportTUI,
 	type OverlayAnchor,
+	type OverlayBounds,
 	type OverlayHandle,
 	type OverlayMargin,
 	type OverlayOptions,
@@ -149,6 +149,10 @@ export {
 	type TuiInputListener,
 	type TuiInputListenerResult,
 	type TuiMode,
+	type TuiMouseButton,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+	type TuiMouseEventType,
 	type TuiStopOptions,
 	type ViewportTUI,
 } from "./tui.ts";
