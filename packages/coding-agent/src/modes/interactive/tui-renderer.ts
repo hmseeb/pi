@@ -33,6 +33,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				const label = ` ↓ Jump to latest message${shortcut ? ` · ${shortcut}` : ""} `;
 				return theme.bg("selectedBg", theme.fg("text", label));
 			},
+			stickyPromptStyle: (text) => theme.bg("userMessageBg", theme.fg("dim", text)),
 			openUrl: options.openUrl ?? openBrowser,
 			onRightClickPaste: options.onRightClickPaste,
 			copyOnSelect: options.fullscreenCopyOnSelect,

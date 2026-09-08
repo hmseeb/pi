@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import {
 	AltScreenSearchComponent,
 	AltScreenSearchIndex,
@@ -69,8 +70,13 @@ const FOCUS_IN = "\x1b[I";
 const FOCUS_OUT = "\x1b[O";
 const BEGIN_SYNCHRONIZED_OUTPUT = "\x1b[?2026h";
 const END_SYNCHRONIZED_OUTPUT = "\x1b[?2026l";
-const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
-const OSC133_PROMPT_START = /^\x1b\]133;A(?:\x07|\x1b\\)/;
+// `133;A` may carry a parameter (`133;A;u` marks a user prompt), so accept an optional `;…`.
+const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:;[^\x07\x1b]*)?(?:\x07|\x1b\\))+/;
+const OSC133_PROMPT_START = /^\x1b\]133;A(?:;[^\x07\x1b]*)?(?:\x07|\x1b\\)/;
+/** Prompt zones opened by a user message specifically (`133;A;u`). */
+const OSC133_USER_PROMPT_START = /^\x1b\]133;A;u(?:\x07|\x1b\\)/;
+/** How far past a prompt marker to look for the prompt's first line of text. */
+const PROMPT_SUMMARY_SCAN_ROWS = 8;
 const PAGE_SCROLL_OVERLAP = 4;
 const ALT_WHEEL_SCROLL_MULTIPLIER = 5;
 const MAX_CACHED_OFFSCREEN_KITTY_IMAGES = 16;
@@ -178,6 +184,11 @@ export interface TuiAltScreenOptions {
 	 * primary scroll view while that view is scrolled away from its end.
 	 */
 	scrollToEndIndicator?: () => string;
+	/**
+	 * Style the sticky header naming the user prompt above the viewport. Rendered on the
+	 * first row of the primary scroll view while scrolled up; clicking it jumps to that prompt.
+	 */
+	stickyPromptStyle?: (text: string) => string;
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
@@ -221,6 +232,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private scrollbarDrag?: ScrollbarDrag;
 	private scrollbarHover?: ScrollView;
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
+	private stickyPromptRect?: ScrollToEndIndicatorRect & { promptRow: number };
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
 	private selectionDragged = false;
@@ -241,6 +253,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly searchNavigationButtonStyle: (text: string, hovered: boolean) => string;
 	private readonly scrollToEndIndicator?: () => string;
+	private readonly stickyPromptStyle?: (text: string) => string;
 	private readonly openUrl?: (url: string) => void;
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
@@ -268,6 +281,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
+		this.stickyPromptStyle = options.stickyPromptStyle;
 		this.openUrl = options.openUrl;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
@@ -913,6 +927,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const overlay = this.dispatchMouseToOverlay(event);
 		if (!overlay.hit) {
 			if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
+			if (this.handleStickyPromptMouseEvent(raw)) return;
 			const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
 			if (!this.scrollbarDrag) this.updateScrollbarHover(raw.x, raw.y);
 			if (scrollbarHandled) return;
@@ -1019,6 +1034,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (!rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
 		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
 		this.scrollToBottom();
+		return true;
+	}
+
+	private handleStickyPromptMouseEvent(event: SgrMouseEvent): boolean {
+		const rect = this.stickyPromptRect;
+		if (!rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
+		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
+		this.getPrimaryScrollView().scrollTo(rect.promptRow);
+		this.requestRender();
 		return true;
 	}
 
@@ -1636,6 +1660,56 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return result;
 	}
 
+	/**
+	 * First line of text inside a prompt zone. The zone-start marker sits on the
+	 * component's top padding row, which is blank, so scan forward to the first
+	 * row that actually carries text.
+	 */
+	private getPromptSummary(lines: readonly string[], promptRow: number): string {
+		const limit = Math.min(lines.length, promptRow + PROMPT_SUMMARY_SCAN_ROWS);
+		for (let row = promptRow; row < limit; row++) {
+			const line = lines[row] ?? "";
+			if (row > promptRow && OSC133_PROMPT_START.test(line)) break;
+			const plain = stripVTControlCharacters(line).replace(/\s+/g, " ").trim();
+			if (plain) return plain;
+		}
+		return "";
+	}
+
+	/**
+	 * Sticky header naming the nearest user prompt scrolled above the viewport.
+	 * Assistant messages open prompt zones too, so match the `;u` variant only.
+	 */
+	private compositeStickyPrompt(screen: string[], layout: LayoutFrame, width: number): string[] {
+		this.stickyPromptRect = undefined;
+		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
+		if (!this.stickyPromptStyle || scrollView.isFollowingEnd) return screen;
+		const box = getScrollViewBox(layout, scrollView);
+		const clip = box?.clip;
+		const lines = box?.scrollContentLines;
+		if (!clip || clip.width <= 0 || clip.height <= 0 || !lines || lines.length === 0) return screen;
+		let promptRow = -1;
+		for (let row = Math.min(scrollView.scrollTop - 1, lines.length - 1); row >= 0; row--) {
+			if (OSC133_USER_PROMPT_START.test(lines[row] ?? "")) {
+				promptRow = row;
+				break;
+			}
+		}
+		if (promptRow < 0) return screen;
+		const plain = this.getPromptSummary(lines, promptRow);
+		if (!plain) return screen;
+		const scrollbarColumn = box ? getScrollbarGeometry(box)?.column : undefined;
+		const availableWidth = Math.max(0, (scrollbarColumn ?? clip.x + clip.width) - clip.x);
+		if (availableWidth <= 0) return screen;
+		const text = this.stickyPromptStyle(
+			truncateToWidth(` ${plain} `, availableWidth, "…").padEnd(availableWidth, " "),
+		);
+		const result = [...screen];
+		result[clip.y] = compositeTuiLine(result[clip.y] ?? "", text, clip.x, availableWidth, width);
+		this.stickyPromptRect = { row: clip.y, column: clip.x, width: availableWidth, promptRow };
+		return result;
+	}
+
 	private compositeFlashes(screen: string[], width: number, height: number): string[] {
 		const flashLines = this.flashes.render(width).slice(-height);
 		if (flashLines.length === 0) return screen;
@@ -1662,6 +1736,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
+		screen = this.compositeStickyPrompt(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
 		screen = this.applySelection(screen, nextLayout);
