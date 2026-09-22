@@ -132,3 +132,29 @@ describe("readClipboardImage", () => {
 		expect(mocks.command).not.toHaveBeenCalled();
 	});
 });
+
+describe("collapseClipboardImagePaths", () => {
+	const a = "/tmp/pi-clipboard-b86254ed-3986-4a3d-9e90-f8227095f1c4.png";
+	const b = "/tmp/pi-clipboard-c07c1b33-c026-469b-864b-64e62bbe3fb8.png";
+
+	test.each([
+		["two back-to-back paths", a + b, "[Image #1][Image #2]", [a, b]],
+		["text glued before a path", "look" + a, "look[Image #1]", [a]],
+		["text glued after a path", a + "okay", "[Image #1]okay", [a]],
+		["text on both sides", "look" + a + "okay", "look[Image #1]okay", [a]],
+		[
+			"windows path",
+			String.raw`see C:\Users\x\Temp\pi-clipboard-b86254ed-3986-4a3d-9e90-f8227095f1c4.png`,
+			"see [Image #1]",
+			[String.raw`C:\Users\x\Temp\pi-clipboard-b86254ed-3986-4a3d-9e90-f8227095f1c4.png`],
+		],
+	])("chips %s", async (_name, input, chipped, paths) => {
+		const { collapseClipboardImagePaths, splitClipboardImagePaths } = await import("../src/utils/clipboard-image.ts");
+		expect(collapseClipboardImagePaths(input)).toBe(chipped);
+		expect(
+			splitClipboardImagePaths(input)
+				.filter((seg) => seg.type === "image")
+				.map((seg) => seg.value),
+		).toEqual(paths);
+	});
+});

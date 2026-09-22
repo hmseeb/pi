@@ -122,7 +122,7 @@ export class CustomMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (this.compact && !this._expanded && !this.customComponent) {
+		if (this.compact && !this._expanded) {
 			return this.renderCompactLine(width);
 		}
 		const lines = super.render(width);

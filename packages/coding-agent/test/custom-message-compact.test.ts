@@ -1,4 +1,4 @@
-import type { TUI } from "@earendil-works/pi-tui";
+import { Text, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
@@ -43,6 +43,19 @@ describe("compact custom messages", () => {
 		expect(lines[0]).toContain("Background Task Notification");
 		expect(lines[0]).toContain('Background task "iPhone Build And Install" completed');
 		expect(lines[0]).not.toContain("<background-task-notification");
+	});
+
+	test("collapses a notification with a custom renderer", () => {
+		const notification = createNotification();
+		notification.customType = "subagent_result";
+		const component = new CustomMessageComponent(notification, () => new Text("custom\nrenderer\npreview", 0, 0));
+		component.setCompact(true);
+		const lines = component
+			.render(100)
+			.map(stripAnsi)
+			.filter((line) => line.trim().length > 0);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("Subagent Result");
 	});
 
 	test("clicking the line opens the full notification", () => {

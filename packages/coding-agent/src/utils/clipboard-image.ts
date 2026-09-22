@@ -17,11 +17,16 @@ export type ClipboardImage = {
 const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
 
 /** Matches temp files written by handleClipboardPaste (`pi-clipboard-<uuid>.<ext>`). */
-const CLIPBOARD_IMAGE_PATH_REGEX = /\S*pi-clipboard-[0-9a-fA-F-]{36}\.(?:png|jpe?g|webp|gif)/g;
+// The paste always writes into os.tmpdir(), so a match must start at an absolute
+// root (`/`, `~`, `\`, `C:\`) and take the shortest prefix from there. Greedy `\S*`
+// swallowed a preceding pasted path (two images collapsed into one chip); an
+// unrooted prefix swallows text typed right before the paste with no space.
+const CLIPBOARD_IMAGE_NAME = String.raw`pi-clipboard-[0-9a-fA-F-]{36}\.(?:png|jpe?g|webp|gif)`;
+const CLIPBOARD_IMAGE_PATH_REGEX = new RegExp(String.raw`(?:[A-Za-z]:[\\/]|[\\/~])\S*?${CLIPBOARD_IMAGE_NAME}`, "g");
 
 /** True when `filePath` is a temp file created by pasting an image into the editor. */
 export function isClipboardImagePath(filePath: string): boolean {
-	return new RegExp(CLIPBOARD_IMAGE_PATH_REGEX.source).test(filePath);
+	return new RegExp(String.raw`(?:^|[\\/])${CLIPBOARD_IMAGE_NAME}$`).test(filePath);
 }
 
 /**
