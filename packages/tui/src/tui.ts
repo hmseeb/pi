@@ -326,6 +326,7 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
 export class Container implements Component {
 	children: Component[] = [];
 	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
+	private renderCache?: { width: number; childLines: string[][]; lines: string[] };
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -370,17 +371,32 @@ export class Container implements Component {
 		return undefined;
 	}
 
+	/**
+	 * Local patch: reuse the previous concatenation when every child returned
+	 * the same array as last frame (components cache their lines and keep the
+	 * reference while unchanged). Callers must treat the result as read-only.
+	 */
 	render(width: number): string[] {
+		const childLines = this.children.map((child) => child.render(width));
+		const cache = this.renderCache;
+		if (
+			cache &&
+			cache.width === width &&
+			cache.childLines.length === childLines.length &&
+			childLines.every((lines, i) => lines === cache.childLines[i])
+		) {
+			return cache.lines;
+		}
 		const lines: string[] = [];
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
-		for (const child of this.children) {
-			const childLines = child.render(width);
-			mouseChildren.push({ component: child, height: childLines.length });
-			for (const line of childLines) {
+		for (let i = 0; i < childLines.length; i++) {
+			mouseChildren.push({ component: this.children[i]!, height: childLines[i]!.length });
+			for (const line of childLines[i]!) {
 				lines.push(line);
 			}
 		}
 		this.mouseLayout = { width, children: mouseChildren };
+		this.renderCache = { width, childLines, lines };
 		return lines;
 	}
 }
@@ -516,6 +532,11 @@ export abstract class TuiBase extends Container implements TUI {
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
+	}
+
+	/** Local patch: the root result is post-processed in place, so never hand out Container's cached array. */
+	override render(width: number): string[] {
+		return super.render(width).slice();
 	}
 
 	protected abstract doRender(): void;
