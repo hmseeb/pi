@@ -50,6 +50,11 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/** True when the message has non-empty text (not just thinking or tool calls). */
+	hasText(): boolean {
+		return !!this.lastMessage?.content.some((c) => c.type === "text" && c.text.trim());
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		if (this.lastMessage) {

@@ -147,6 +147,7 @@ import { EarendilAnnouncementComponent } from "./components/earendil-announcemen
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
+import { FocusContainer } from "./components/focus-container.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
@@ -437,7 +438,7 @@ export class InteractiveMode {
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
 	private loadedResourcesContainer: Container;
-	private chatContainer: Container;
+	private chatContainer: FocusContainer;
 	private documentContainer: Container;
 	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
 	private fullscreenLayoutRoot: Component | undefined;
@@ -619,7 +620,7 @@ export class InteractiveMode {
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
-		this.chatContainer = new Container();
+		this.chatContainer = new FocusContainer();
 		this.documentContainer = new Container();
 		this.documentContainer.addChild(this.headerContainer);
 		this.documentContainer.addChild(this.loadedResourcesContainer);
@@ -3103,6 +3104,7 @@ export class InteractiveMode {
 		);
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
+		this.defaultEditor.onAction("app.message.sendNow", () => void this.handleSendNow());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
@@ -3229,6 +3231,13 @@ export class InteractiveMode {
 				const hint = text.slice("/bug".length).trim();
 				this.editor.setText("");
 				await this.handleBugCommand(hint ? hint : undefined);
+				return;
+			}
+			if (text === "/focus") {
+				this.chatContainer.focus = !this.chatContainer.focus;
+				this.editor.setText("");
+				this.showStatus(`Focus view: ${this.chatContainer.focus ? "on" : "off"}`);
+				this.ui.requestRender();
 				return;
 			}
 			if (text === "/copy") {
@@ -4484,6 +4493,21 @@ export class InteractiveMode {
 		}
 	}
 
+	/** Interrupt the running turn and send every queued message plus the editor text as one prompt. */
+	private async handleSendNow(): Promise<void> {
+		const typed = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
+		if (!this.session.isStreaming || this.session.isCompacting) {
+			if (typed) this.editor.onSubmit?.(typed);
+			return;
+		}
+		const { steering, followUp } = this.clearAllQueues();
+		const text = [...steering, ...followUp, typed].filter(Boolean).join("\n\n");
+		this.editor.setText("");
+		this.updatePendingMessagesDisplay();
+		await this.session.abort();
+		if (text) this.editor.onSubmit?.(text);
+	}
+
 	private handleDequeue(): void {
 		const restored = this.restoreQueuedMessagesToEditor();
 		if (restored === 0) {
@@ -4736,7 +4760,11 @@ export class InteractiveMode {
 				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
-			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
+			const sendNowHint = this.getAppKeyDisplay("app.message.sendNow");
+			const hintText = theme.fg(
+				"dim",
+				`↳ ${dequeueHint} to edit all queued messages · ${sendNowHint} to interrupt and send now`,
+			);
 			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}

@@ -97,7 +97,7 @@ export class ToolExecutionComponent extends Container {
 	private rendererState: any = {};
 	private imageComponents: Image[] = [];
 	private imageSpacers: Spacer[] = [];
-	private toolName: string;
+	readonly toolName: string;
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
