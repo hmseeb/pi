@@ -1307,7 +1307,10 @@ export function sliceWithWidth(
 		// position immediately, so a single indexOf finds the run end. The previous
 		// per-character probe made this O(line length) function calls, which
 		// profiling showed dominating frame time on transcripts with long lines.
-		let textEnd = line.indexOf("\x1b", i);
+		// Search from i + 1: if line[i] is an ESC extractAnsiCode rejected (e.g. a
+		// stray "\x1b\\"), searching from i returns i, the run is empty and the
+		// loop never advances. Treat the lone ESC as text instead.
+		let textEnd = line.indexOf("\x1b", i + 1);
 		if (textEnd === -1) textEnd = line.length;
 
 		const run = line.slice(i, textEnd);

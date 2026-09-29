@@ -82,4 +82,9 @@ describe("sliceWithWidth ANSI run scanning", () => {
 		assert.deepStrictEqual(sliceWithWidth("abc", 0, 0, true), { text: "", width: 0 });
 		assert.deepStrictEqual(sliceWithWidth("abc", 0, -1, true), { text: "", width: 0 });
 	});
+	it("does not hang on a stray ESC that is not a valid ANSI sequence", () => {
+		// Regression: a lone "\x1b\\" in the sticky prompt froze the TUI at 100% CPU.
+		const { text } = sliceWithWidth("a\x1b\\bc", 0, 10, true);
+		assert.ok(text.includes("bc"));
+	});
 });
